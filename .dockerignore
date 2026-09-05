@@ -1,0 +1,10 @@
+.git
+.tools
+.m2
+.env
+target
+data
+music
+frontend/node_modules
+frontend/dist
+*.log

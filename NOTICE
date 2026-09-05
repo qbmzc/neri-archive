@@ -1,0 +1,6 @@
+Neri Archive includes protocol logic adapted from NeriPlayer.
+Copyright (C) 2025 NeriPlayer developers.
+Original project: https://github.com/cwuom/NeriPlayer
+Original file: app/src/main/java/moe/ouom/neriplayer/core/api/netease/NeteaseCrypto.kt
+License: GNU General Public License version 3 or (at your option) any later version.
+The original project's LICENSE is included alongside this notice.

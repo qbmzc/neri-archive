@@ -45,6 +45,13 @@ docker compose up -d --build
 
 Dockerfile 使用可供 amd64/arm64 构建的基础镜像；双架构实际镜像需要在相应平台或 buildx 环境验证。仓库不包含已发布镜像，Compose 从本地源码构建。
 
+仓库同时提供 GitHub Actions 构建的 GHCR 镜像（push 到 `main` 或 `v*` tag 时自动构建，amd64）：
+
+```sh
+docker pull ghcr.io/qbmzc/neri-archive:latest
+# 或指定版本镜像 ghcr.io/qbmzc/neri-archive:0.1.0
+```
+
 ## 本地 Java 开发
 
 要求 JDK 21、Maven 3.6.3+、Node.js 22.12+（或兼容的 Node 24）、ffmpeg/ffprobe 在 PATH 中。

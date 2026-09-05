@@ -39,6 +39,7 @@ jobs:
           tags: |
             type=ref,event=branch
             type=ref,event=tag
+            type=ref,event=tag,pattern={{version}}
             type=sha,prefix=sha-,format=short
 
       - name: Build and push

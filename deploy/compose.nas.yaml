@@ -1,0 +1,30 @@
+# Neri Archive NAS 部署（Compose v2）
+# 用法：docker compose -f compose.nas.yaml up -d
+# 首次：docker login ghcr.io -u qbmzc（密码用 read:packages 权限的 PAT）
+# 目录权限：mkdir -p data music && sudo chown -R 10001:10001 data music
+
+name: neri-archive
+
+services:
+  archive:
+    image: ghcr.io/qbmzc/neri-archive:v0.1.0
+    container_name: neri-archive
+    restart: unless-stopped
+    init: true
+    ports:
+      # 0.0.0.0:8080，局域网可直接访问；如走 HTTPS 反代改为 127.0.0.1:8080:8080
+      - "${NERI_PORT:-8080}:8080"
+    environment:
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?请在 .env 中设置 ADMIN_PASSWORD（至少 12 字符）}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      DOWNLOAD_PARALLELISM: ${DOWNLOAD_PARALLELISM:-2}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - ./data:/data
+      - ./music:/music
+    stop_grace_period: 45s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

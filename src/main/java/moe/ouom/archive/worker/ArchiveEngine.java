@@ -14,6 +14,7 @@ import static moe.ouom.archive.store.ArchiveStore.*;
 
 @Component
 public class ArchiveEngine {
+    private static final org.slf4j.Logger log=org.slf4j.LoggerFactory.getLogger(ArchiveEngine.class);
     private final ArchiveStore store;
     private final MusicGateway gateway;
     private final DownloadWorker worker;
@@ -48,7 +49,7 @@ public class ArchiveEngine {
             if(number(sub,"enabled")==0||number(sub,"next_scan")>now) continue;
             try { store.applySnapshot(gateway.playlist(number(sub,"id"))); }
             catch(MusicGateway.AuthRequired e) { store.scanFailure(number(sub,"id"),e.getMessage()); }
-            catch(Exception e) { store.scanFailure(number(sub,"id"),DownloadWorker.safeError(e)); }
+            catch(Exception e) { log.warn("歌单 {} 扫描失败：{}",number(sub,"id"),DownloadWorker.safeError(e)); store.scanFailure(number(sub,"id"),DownloadWorker.safeError(e)); }
         }
         exportPlaylists();
         if(now-lastRepair>24L*3600*1000) { repairMissing(); lastRepair=now; }
@@ -66,7 +67,7 @@ public class ArchiveEngine {
     public void exportPlaylists() {
         for(var sub:store.subscriptions()) {
             try { files.playlist(number(sub,"id"),text(sub,"name"),store.playlistSongs(number(sub,"id"))); }
-            catch(Exception ignored) { /* Retry export on the next scan; audio is independent of M3U8. */ }
+            catch(Exception e) { log.warn("歌单 {} 导出失败：{}",number(sub,"id"),DownloadWorker.safeError(e)); }
         }
     }
     @PreDestroy void close() { downloads.shutdownNow(); }

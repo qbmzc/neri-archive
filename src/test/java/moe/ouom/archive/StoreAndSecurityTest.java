@@ -71,6 +71,16 @@ class StoreAndSecurityTest {
         long old=number(store.tasks().getFirst(),"id"); store.control(old,"cancel"); store.enqueue(11,"FIDELITY");
         assertThrows(IllegalArgumentException.class,()->store.control(old,"retry"));
     }
+    @Test void runtimeLogsRequireLoginAndSupportFiltering() throws Exception {
+        org.slf4j.LoggerFactory.getLogger("runtime-test").warn("task #54 diagnostic MUSIC_U=private-value");
+        mvc.perform(get("/api/logs")).andExpect(status().isUnauthorized());
+        mvc.perform(get("/api/logs").with(user("admin")).param("level","WARN").param("query","task #54 diagnostic"))
+            .andExpect(status().isOk()).andExpect(header().string("Cache-Control","no-store"))
+            .andExpect(jsonPath("$[0].level").value("WARN"))
+            .andExpect(jsonPath("$[0].message").value("task #54 diagnostic MUSIC_U=[已隐藏]"));
+        mvc.perform(get("/api/logs").with(user("admin")).param("level","ERROR").param("query","task #54 diagnostic"))
+            .andExpect(jsonPath("$.length()").value(0));
+    }
     @Test void apiRequiresAuthenticationAndCsrf() throws Exception {
         mvc.perform(get("/api/overview")).andExpect(status().isUnauthorized());
         mvc.perform(get("/healthz")).andExpect(status().isOk());

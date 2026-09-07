@@ -12,6 +12,53 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 class DownloadWorkerTest {
+    @Test void retainsLargerFileAndCommitsItsMetadata() throws Exception {
+        exerciseSizePolicy(true,false);
+    }
+    @Test void replacesSmallerFileOnlyAfterDatabaseCommit() throws Exception {
+        exerciseSizePolicy(false,false);
+    }
+    @Test void databaseFailurePreservesPreviousFile() throws Exception {
+        exerciseSizePolicy(false,true);
+    }
+    void exerciseSizePolicy(boolean keepOld,boolean failCommit) throws Exception {
+        var mapper=new ObjectMapper();
+        var media=spy(files);
+        var gateway=mock(moe.ouom.archive.netease.MusicGateway.class);
+        String old="Artist/Album/Song [11]-abcdefabcdef.flac";
+        Files.createDirectories(files.safe(old).getParent());
+        Files.writeString(files.safe(old),keepOld?"larger old audio":"old");
+        var song=Map.<String,Object>of("id",11,"name","Song","artist","Artist","album","Album","path",old,"level","lossless","duration",3000);
+        when(store.song(11)).thenReturn(song);
+        when(gateway.resource(eq(11L),anyString())).thenReturn(mapper.readTree("{\"code\":200,\"data\":{\"url\":\"https://example.com/audio\",\"level\":\"jymaster\",\"size\":6}}"));
+        when(gateway.lyrics(11)).thenReturn(mapper.createObjectNode());
+        var newProbe=new MediaFiles.Probe("flac",3,96000,24,900000);
+        var oldProbe=new MediaFiles.Probe("flac",3,44100,16,400000);
+        doReturn(newProbe).when(media).probe(any(Path.class),eq(3000L));
+        doReturn(oldProbe).when(media).probe(files.safe(old),3000);
+        doAnswer(i->i.getArgument(0)).when(media).tag(any(),any(),anyMap());
+        if(failCommit) doThrow(new IllegalStateException("database failure")).when(store).complete(anyLong(),anyLong(),anyString(),anyString(),anyLong(),anyString(),anyInt(),anyInt(),anyInt(),anyString());
+        var worker=new DownloadWorker(store,gateway,media,mapper,new SafeHttp()) {
+            @Override void transfer(long id,QualitySelector.Resource resource,Path part,Path signature) throws Exception { Files.writeString(part,"new123"); }
+        };
+        worker.run(Map.of("id",1,"song_id",11,"policy","FIDELITY","attempts",1));
+        if(keepOld) {
+            assertEquals("larger old audio",Files.readString(files.safe(old)));
+            verify(store).complete(eq(1L),eq(11L),eq(old),eq("lossless"),eq(16L),eq(MediaFiles.hash(files.safe(old),"SHA-256")),eq(44100),eq(16),eq(400000),eq(""));
+        } else if(failCommit) {
+            assertEquals("old",Files.readString(files.safe(old)));
+        } else {
+            assertFalse(Files.exists(files.safe(old)));
+            String hash=java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest("new123".getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+            assertEquals("new123",Files.readString(media.safe(media.relative(song,"flac",hash))));
+            verify(store).complete(eq(1L),eq(11L),eq(files.relative(song,"flac",hash)),eq("jymaster"),eq(6L),eq(hash),eq(96000),eq(24),eq(900000),eq(""));
+        }
+    }
+    @Test void filesystemErrorsExplainTheCause() {
+        assertTrue(DownloadWorker.safeError(new AccessDeniedException("/music/董贞")).contains("无写入权限"));
+        assertTrue(DownloadWorker.safeError(new FileAlreadyExistsException("/music/董贞")).contains("同名文件"));
+        assertTrue(DownloadWorker.safeError(new IOException("bad https://example.com/private?token=abc")).contains("[资源地址]"));
+    }
     @TempDir Path root;
     ArchiveStore store;
     MediaFiles files;

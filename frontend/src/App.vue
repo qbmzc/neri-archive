@@ -1,9 +1,16 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 const clearTimeout = (id: number) => window.clearTimeout(id);
 type Row = Record<string, any>;
 const tab = ref('overview');
-const tabs = [{ id: 'overview', icon: '◫', label: '总览' }, { id: 'subscriptions', icon: '▤', label: '歌单订阅' }, { id: 'tasks', icon: '↓', label: '下载队列' }, { id: 'library', icon: '♫', label: '音乐档案' }, { id: 'settings', icon: '⚙', label: '账号与设置' }];
+const tabs = [{ id: 'overview', icon: '◫', label: '总览' }, { id: 'subscriptions', icon: '▤', label: '歌单订阅' }, { id: 'tasks', icon: '↓', label: '下载队列' }, { id: 'library', icon: '♫', label: '音乐档案' }, { id: 'logs', icon: '≡', label: '运行日志' }, { id: 'settings', icon: '⚙', label: '账号与设置' }];
+const logs = ref<Row[]>([]); const logLevel = ref('ALL'); const logQuery = ref(''); const logAuto = ref(true); const logError = ref(''); const logBusy = ref(false);
+async function refreshLogs() {
+  if (logBusy.value) return; logBusy.value = true;
+  try { logs.value = await api('/logs?level=' + encodeURIComponent(logLevel.value) + '&query=' + encodeURIComponent(logQuery.value)); logError.value = ''; }
+  catch (e) { logError.value = (e as Error).message; } finally { logBusy.value = false; }
+}
+watch([tab, logLevel], () => { if (tab.value === 'logs') void refreshLogs(); });
 const overview = ref<Row>({}); const subscriptions = ref<Row[]>([]); const tasks = ref<Row[]>([]); const library = ref<Row[]>([]);
 const account = ref<Row | null>(null); const accountMessage = ref('尚未检查登录'); const loaded = ref(false); const busy = ref(false);
 const toast = ref(''); const query = ref(''); const filter = ref('ALL'); const cookie = ref(''); const modal = ref(false);
@@ -69,7 +76,7 @@ function date(value: number) { return value ? new Date(value).toLocaleString('zh
 function percent(task: Row) { return task.total_bytes ? Math.min(100, Math.round(task.bytes_done / task.total_bytes * 100)) : 0; }
 onMounted(async () => {
   try { csrf = await api('/csrf'); await refresh(); void checkAccount(); } catch (e) { notify((e as Error).message); }
-  const poll = async () => { try { await refresh(); } catch (e) { notify((e as Error).message); } finally { refreshTimer = window.setTimeout(poll, 4000); } };
+  const poll = async () => { try { if (tab.value === 'logs') { if (logAuto.value) await refreshLogs(); } else await refresh(); } catch (e) { notify((e as Error).message); } finally { refreshTimer = window.setTimeout(poll, 4000); } };
   refreshTimer = window.setTimeout(poll, 4000);
 });
 onUnmounted(() => { clearTimeout(refreshTimer); clearTimeout(qrTimer); clearTimeout(toastTimer); });
@@ -109,6 +116,13 @@ onUnmounted(() => { clearTimeout(refreshTimer); clearTimeout(qrTimer); clearTime
           <input v-model="query" class="search" placeholder="搜索歌曲、歌手或专辑…" aria-label="搜索媒体库">
           <div v-if="!shownLibrary.length" class="empty"><span>♫</span><h3>{{ query ? '没有匹配的音乐' : '档案正在等待第一首音乐' }}</h3><p>完整下载并校验通过后，歌曲会出现在这里。</p></div>
           <div v-else class="table-wrap"><table><thead><tr><th>歌曲 / 专辑</th><th>音质</th><th>文件</th><th>归档时间</th><th></th></tr></thead><tbody><tr v-for="song in shownLibrary" :key="song.id"><td><strong>{{ song.name }}</strong><small>{{ song.artist }} · {{ song.album }}</small><small class="path" :title="song.path">{{ song.path }}</small><small v-if="song.metadata_warning" class="danger-text">{{ song.metadata_warning }}</small></td><td><span class="quality">{{ quality[song.level] || '未知档位' }}</span><small>{{ song.sample_rate ? `${song.sample_rate / 1000} kHz` : '采样率未知' }} {{ song.bits ? `/ ${song.bits} bit` : '' }}</small></td><td>{{ bytes(song.bytes) }}</td><td>{{ date(song.downloaded_at) }}</td><td><button :disabled="busy" @click="action(() => api(`/library/${song.id}/upgrade`, 'POST'), '已安排音质检查')">检查升级</button></td></tr></tbody></table></div>
+        </template>
+        <template v-if="tab === 'logs'">
+          <div class="page-heading"><div><div class="eyebrow">RUNTIME LOGS</div><h1>运行日志</h1><p>当前进程保留最近 1000 条，最多显示 500 条，最新在前。重启后清空。</p></div><button class="secondary" :disabled="logBusy" @click="refreshLogs">刷新日志</button></div>
+          <div class="log-toolbar"><select v-model="logLevel" aria-label="日志级别"><option value="ALL">全部级别</option><option v-for="level in ['INFO', 'WARN', 'ERROR', 'DEBUG']" :key="level">{{ level }}</option></select><form @submit.prevent="refreshLogs"><input v-model="logQuery" placeholder="搜索任务编号、路径或错误…" aria-label="搜索日志"><button :disabled="logBusy">搜索</button></form><label class="check"><input v-model="logAuto" type="checkbox">每 4 秒刷新</label></div>
+          <p v-if="logError" class="task-error" role="alert">{{ logError }}</p>
+          <div v-if="!logs.length" class="empty">暂无匹配日志</div>
+          <div v-else class="runtime-logs"><article v-for="entry in logs" :key="entry.id"><div><time>{{ new Date(entry.timestamp).toLocaleString('zh-CN') }}</time> <strong :class="'log-' + entry.level">{{ entry.level }}</strong> <small>{{ entry.logger }}</small></div><pre>{{ entry.message }}</pre></article></div>
         </template>
         <template v-if="tab === 'settings'">
           <div class="page-heading"><div><div class="eyebrow">CONNECTION & STORAGE</div><h1>账号与设置</h1><p>连接你的网易云音乐账号，使用账号可获取的音乐资源。</p></div></div>

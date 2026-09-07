@@ -41,6 +41,44 @@ public class MediaFiles {
     public String relative(Map<String,Object> song,String ext,String hash) {
         return filename(text(song,"artist"))+"/"+filename(text(song,"album"))+"/"+filename(text(song,"name"))+" ["+number(song,"id")+"]-"+hash.substring(0,12)+"."+ext;
     }
+    /** Match the exact destination, previous archive, and same-song filenames in this album. */
+    public List<Path> versions(Map<String,Object> song,String ext,String destination) throws IOException {
+        var result=new LinkedHashSet<Path>();
+        Path target=safe(destination), directory=target.getParent();
+        String old=text(song,"path");
+        if(!old.isBlank()) addRegular(result,safe(old));
+        addRegular(result,target);
+        String title=filename(text(song,"name"));
+        String stem=title+" ["+number(song,"id")+"]";
+        if(Files.isDirectory(directory,LinkOption.NOFOLLOW_LINKS)) {
+            try(var entries=Files.newDirectoryStream(directory)) {
+                for(Path entry:entries) {
+                    String name=entry.getFileName().toString();
+                    if(name.equals(title+"."+ext)||name.equals(stem+"."+ext)
+                            ||name.matches(java.util.regex.Pattern.quote(stem)+"-[0-9a-fA-F]{12}\\."+java.util.regex.Pattern.quote(ext)))
+                        addRegular(result,safe(root.relativize(entry).toString()));
+                }
+            }
+        }
+        return List.copyOf(result);
+    }
+    private static void addRegular(Set<Path> paths,Path path) throws IOException {
+        if(Files.exists(path,LinkOption.NOFOLLOW_LINKS)) {
+            if(!Files.isRegularFile(path,LinkOption.NOFOLLOW_LINKS)) throw new FileSystemException(path.toString(),null,"音频目标不是普通文件");
+            paths.add(path);
+        }
+    }
+    public static Path largest(Path incoming,List<Path> existing) throws IOException {
+        Path selected=incoming;
+        long size=Files.size(incoming);
+        for(Path candidate:existing) {
+            long candidateSize=Files.size(candidate);
+            if(candidateSize>size || (candidateSize==size && selected.equals(incoming))) {
+                selected=candidate; size=candidateSize;
+            }
+        }
+        return selected;
+    }
     private String run(List<String> args,int seconds) throws Exception {
         Path output=Files.createTempFile(root.resolve(".work"),"probe-",".log");
         Process process=null;
@@ -79,7 +117,8 @@ public class MediaFiles {
         return HexFormat.of().formatHex(digest.digest());
     }
     public static void move(Path source,Path dest) throws IOException {
-        Files.createDirectories(dest.getParent()); Files.move(source,dest,StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING);
+        if(!Files.isDirectory(dest.getParent(),LinkOption.NOFOLLOW_LINKS)) Files.createDirectories(dest.getParent());
+        Files.move(source,dest,StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING);
     }
     public synchronized void playlist(long id,String name,List<Map<String,Object>> songs) throws IOException {
         StringBuilder content=new StringBuilder("#EXTM3U\n");

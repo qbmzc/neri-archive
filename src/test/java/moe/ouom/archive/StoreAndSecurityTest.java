@@ -31,7 +31,7 @@ class StoreAndSecurityTest {
     @Autowired ArchiveStore store;
     @Autowired JdbcTemplate db;
     @Autowired MockMvc mvc;
-    @BeforeEach void reset() { db.update("DELETE FROM tasks"); db.update("DELETE FROM members"); db.update("DELETE FROM subscriptions"); db.update("DELETE FROM songs"); }
+    @BeforeEach void reset() { db.update("DELETE FROM tasks"); db.update("DELETE FROM members"); db.update("DELETE FROM subscriptions"); db.update("DELETE FROM songs"); db.update("DELETE FROM audio_fingerprints"); db.update("DELETE FROM file_inventory"); }
     Track track(long id) { return new Track(id,"Song "+id,"Artist","Album","",180000,1); }
     Playlist playlist(long id,Track... tracks) { return new Playlist(id,"Playlist",List.of(tracks)); }
     @Test void firstSnapshotAndCrossPlaylistDeduplication() {
@@ -94,6 +94,23 @@ class StoreAndSecurityTest {
                 .andExpect(status().isOk()).andExpect(jsonPath("$.duplicateGroups").value(0));
         mvc.perform(post("/api/library/duplicates/scan").with(user("admin")).with(csrf()))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.started").value(true));
+    }
+    @Test void scannedFilesAreSearchableAndPaginated() throws Exception {
+        long now=System.currentTimeMillis();
+        db.update("INSERT INTO file_inventory(path,bytes,modified_at,sha256,scanned_at) VALUES(?,?,?,?,?)","Artist/Album/a.flac",10,now,"same",now);
+        db.update("INSERT INTO file_inventory(path,bytes,modified_at,sha256,scanned_at) VALUES(?,?,?,?,?)","Artist/Album/b.flac",10,now,"same",now);
+        db.update("INSERT INTO file_inventory(path,bytes,modified_at,sha256,scanned_at) VALUES(?,?,?,?,?)","Other/unique.mp3",7,now,"unique",now);
+        db.update("INSERT INTO audio_fingerprints(path,duration_seconds,fingerprint_hash,group_id,match_type,scanned_at) VALUES(?,?,?,?,?,?)","Artist/Album/a.flac",180,1,"exact-1","EXACT",now);
+        db.update("INSERT INTO audio_fingerprints(path,duration_seconds,fingerprint_hash,group_id,match_type,scanned_at) VALUES(?,?,?,?,?,?)","Artist/Album/b.flac",180,1,"exact-1","EXACT",now);
+        db.update("INSERT INTO audio_fingerprints(path,duration_seconds,fingerprint_hash,group_id,match_type,scanned_at) VALUES(?,?,?,?,?,?)","Other/unique.mp3",200,2,"","",now);
+        mvc.perform(get("/api/library/files").with(user("admin")).param("pageSize","10"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.total").value(3))
+                .andExpect(jsonPath("$.totalPages").value(1)).andExpect(jsonPath("$.items.length()").value(3))
+                .andExpect(jsonPath("$.items[0].duplicate_count").value(2));
+        mvc.perform(get("/api/library/files").with(user("admin")).param("query","unique"))
+                .andExpect(jsonPath("$.total").value(1)).andExpect(jsonPath("$.items[0].path").value("Other/unique.mp3"));
+        mvc.perform(get("/api/library/files").with(user("admin")).param("filter","DUPLICATE"))
+                .andExpect(jsonPath("$.total").value(2));
     }
     @Test void actualPasswordLoginWorks() throws Exception {
         mvc.perform(post("/login").with(csrf()).param("username","admin").param("password","test-password-only-123"))

@@ -9,7 +9,8 @@ import java.util.*;
 
 @Repository
 public class ArchiveStore {
-    public record InventoryEntry(String path,long bytes,long modifiedAt,String sha256,long scannedAt) {}
+    public record InventoryEntry(String path,long bytes,long modifiedAt,String sha256,long audioHash,double audioDuration,
+                                 String duplicateGroup,String matchType,long scannedAt) {}
     private final JdbcTemplate db;
     private final TransactionTemplate tx;
     public ArchiveStore(JdbcTemplate db,PlatformTransactionManager tm) { this.db=db; tx=new TransactionTemplate(tm); }
@@ -22,12 +23,42 @@ public class ArchiveStore {
     private Map<String,Object> one(String sql,Object... args) { var rows=db.queryForList(sql,args); return rows.isEmpty()?Map.of():rows.getFirst(); }
     public List<Map<String,Object>> tasks() { return db.queryForList("SELECT t.*,s.name,s.artist FROM tasks t JOIN songs s ON t.song_id=s.id ORDER BY t.id DESC LIMIT 500"); }
     public List<Map<String,Object>> library() { return db.queryForList("SELECT * FROM songs WHERE path IS NOT NULL ORDER BY downloaded_at DESC"); }
-    public List<Map<String,Object>> fileInventory() { return db.queryForList("SELECT * FROM file_inventory ORDER BY path"); }
+    public List<Map<String,Object>> fileInventory() { return db.queryForList("SELECT f.*,COALESCE(a.duration_seconds,0) AS audio_duration,COALESCE(a.fingerprint_hash,-1) AS audio_hash,COALESCE(a.group_id,'') AS duplicate_group,COALESCE(a.match_type,'') AS match_type FROM file_inventory f LEFT JOIN audio_fingerprints a ON a.path=f.path ORDER BY f.path"); }
+    public Map<String,Object> fileInventoryPage(int requestedPage,int requestedPageSize,String requestedQuery,String requestedFilter) {
+        int page=Math.max(1,requestedPage),pageSize=Math.clamp(requestedPageSize,10,100);
+        String query=Objects.toString(requestedQuery,"").trim().toLowerCase(Locale.ROOT);
+        String filter=Objects.toString(requestedFilter,"ALL").toUpperCase(Locale.ROOT);
+        if(!Set.of("ALL","ARCHIVED","UNTRACKED","DUPLICATE").contains(filter)) throw new IllegalArgumentException("文件筛选条件无效");
+        StringBuilder where=new StringBuilder(" WHERE 1=1");
+        List<Object> args=new ArrayList<>();
+        if(!query.isBlank()) {
+            where.append(" AND (lower(f.path) LIKE ? ESCAPE '\\' OR lower(COALESCE(s.name,'')) LIKE ? ESCAPE '\\' OR lower(COALESCE(s.artist,'')) LIKE ? ESCAPE '\\' OR lower(COALESCE(s.album,'')) LIKE ? ESCAPE '\\')");
+            String pattern="%"+query.replace("\\","\\\\").replace("%","\\%").replace("_","\\_")+"%";
+            for(int i=0;i<4;i++) args.add(pattern);
+        }
+        switch(filter) {
+            case "ARCHIVED" -> where.append(" AND s.id IS NOT NULL");
+            case "UNTRACKED" -> where.append(" AND s.id IS NULL");
+            case "DUPLICATE" -> where.append(" AND a.group_id<>''");
+        }
+        String from=" FROM file_inventory f LEFT JOIN audio_fingerprints a ON a.path=f.path LEFT JOIN songs s ON replace(s.path,'\\','/')=f.path";
+        long total=db.queryForObject("SELECT count(*)"+from+where,Long.class,args.toArray());
+        int totalPages=Math.max(1,(int)Math.ceil(total/(double)pageSize));
+        page=Math.min(page,totalPages);
+        List<Object> pageArgs=new ArrayList<>(args); pageArgs.add(pageSize); pageArgs.add((page-1)*pageSize);
+        String select="SELECT f.*,s.id AS song_id,s.name,s.artist,s.album,a.duration_seconds AS audio_duration,a.fingerprint_hash AS audio_hash,a.match_type,"+
+                "CASE WHEN a.group_id='' OR a.group_id IS NULL THEN 1 ELSE (SELECT count(*) FROM audio_fingerprints d WHERE d.group_id=a.group_id) END AS duplicate_count";
+        var items=db.queryForList(select+from+where+" ORDER BY f.path LIMIT ? OFFSET ?",pageArgs.toArray());
+        return Map.of("items",items,"total",total,"page",page,"pageSize",pageSize,"totalPages",totalPages,"filter",filter,"query",query);
+    }
     public synchronized void replaceFileInventory(List<InventoryEntry> entries) {
         tx.executeWithoutResult(status -> {
+            db.update("DELETE FROM audio_fingerprints");
             db.update("DELETE FROM file_inventory");
             for(var entry:entries) db.update("INSERT INTO file_inventory(path,bytes,modified_at,sha256,scanned_at) VALUES(?,?,?,?,?)",
                     entry.path(),entry.bytes(),entry.modifiedAt(),entry.sha256(),entry.scannedAt());
+            for(var entry:entries) db.update("INSERT INTO audio_fingerprints(path,duration_seconds,fingerprint_hash,group_id,match_type,scanned_at) VALUES(?,?,?,?,?,?)",
+                    entry.path(),entry.audioDuration(),entry.audioHash(),entry.duplicateGroup(),entry.matchType(),entry.scannedAt());
         });
     }
     public List<Map<String,Object>> playlistSongs(long id) { return db.queryForList("SELECT s.* FROM members m JOIN songs s ON m.song_id=s.id WHERE m.playlist_id=? ORDER BY m.position",id); }

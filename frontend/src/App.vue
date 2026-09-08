@@ -13,6 +13,8 @@ async function refreshLogs() {
 watch([tab, logLevel], () => { if (tab.value === 'logs') void refreshLogs(); });
 const overview = ref<Row>({}); const subscriptions = ref<Row[]>([]); const tasks = ref<Row[]>([]); const library = ref<Row[]>([]);
 const duplicates = ref<Row>({ state: 'IDLE', groups: [] });
+const inventory = ref<Row>({ items: [], total: 0, page: 1, pageSize: 50, totalPages: 1 });
+const filePage = ref(1); const fileQuery = ref(''); const fileFilter = ref('ALL'); let inventoryRequest = 0;
 const account = ref<Row | null>(null); const accountMessage = ref('尚未检查登录'); const loaded = ref(false); const busy = ref(false);
 const toast = ref(''); const query = ref(''); const filter = ref('ALL'); const cookie = ref(''); const modal = ref(false);
 const form = ref({ source: '', intervalMinutes: 15, initialDownload: true, policy: 'FIDELITY', autoUpgrade: false });
@@ -35,9 +37,20 @@ async function api(path: string, method = 'GET', data?: unknown) {
   return result;
 }
 async function refresh() {
+  const firstLoad = !loaded.value;
   const results = await Promise.all([api('/overview'), api('/subscriptions'), api('/tasks'), api('/library'), api('/library/duplicates')]);
   [overview.value, subscriptions.value, tasks.value, library.value, duplicates.value] = results; loaded.value = true;
+  if (firstLoad || tab.value === 'library') await refreshInventory();
 }
+async function refreshInventory() {
+  const request = ++inventoryRequest;
+  const path = `/library/files?page=${filePage.value}&pageSize=50&filter=${encodeURIComponent(fileFilter.value)}&query=${encodeURIComponent(fileQuery.value.trim())}`;
+  const result = await api(path);
+  if (request !== inventoryRequest) return;
+  inventory.value = result; filePage.value = result.page;
+}
+async function searchInventory() { filePage.value = 1; await refreshInventory(); }
+async function changeFilePage(page: number) { filePage.value = page; await refreshInventory(); }
 async function checkAccount() {
   try { account.value = await api('/account'); accountMessage.value = '网易云已连接'; }
   catch (e) { account.value = null; accountMessage.value = (e as Error).message; }
@@ -74,6 +87,7 @@ async function pollQr() {
 async function logoutAdmin() { await fetch('/logout', { method: 'POST', headers: { [csrf.header]: csrf.token } }); window.location.href = '/login'; }
 function bytes(value: number) { if (!value) return '0 B'; const i = Math.min(3, Math.floor(Math.log(value) / Math.log(1024))); return (value / 1024 ** i).toFixed(i ? 1 : 0) + [' B', ' KB', ' MB', ' GB'][i]; }
 function date(value: number) { return value ? new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '等待首次检查'; }
+function audioFingerprint(value: unknown) { return typeof value === 'number' && value >= 0 ? value.toString(16).padStart(8, '0') : '未生成'; }
 function percent(task: Row) { return task.total_bytes ? Math.min(100, Math.round(task.bytes_done / task.total_bytes * 100)) : 0; }
 onMounted(async () => {
   try { csrf = await api('/csrf'); await refresh(); void checkAccount(); } catch (e) { notify((e as Error).message); }
@@ -116,12 +130,19 @@ onUnmounted(() => { clearTimeout(refreshTimer); clearTimeout(qrTimer); clearTime
           <div class="page-heading"><div><div class="eyebrow">COLLECTION</div><h1>音乐档案</h1><p>文件保存在服务器音乐目录，每首歌曲只归档一份。</p></div><div class="button-row"><button class="secondary" :disabled="busy || duplicates.state === 'RUNNING'" @click="action(() => api('/library/duplicates/scan', 'POST'), '已开始扫描现有音频文件')">{{ duplicates.state === 'RUNNING' ? '正在扫描…' : '检查重复文件' }}</button><button class="secondary" :disabled="busy" @click="action(() => api('/library/repair', 'POST'), '缺失文件已加入补下载队列')">检查缺失文件</button></div></div>
           <section class="duplicate-summary">
             <div><span>已清点音频</span><strong>{{ duplicates.fileCount ?? 0 }}</strong><small>个文件</small></div>
-            <div><span>重复内容</span><strong>{{ duplicates.duplicateGroups ?? 0 }}</strong><small>组 / {{ duplicates.duplicateFiles ?? 0 }} 个副本</small></div>
+            <div><span>重复或疑似重复</span><strong>{{ duplicates.duplicateGroups ?? 0 }}</strong><small>组 / {{ duplicates.duplicateFiles ?? 0 }} 个副本</small></div>
             <div><span>可释放空间</span><strong>{{ bytes(duplicates.reclaimableBytes) }}</strong><small>{{ duplicates.completedAt ? `上次完成 ${date(duplicates.completedAt)}` : '等待首次扫描' }}</small></div>
           </section>
           <p v-if="duplicates.error" class="task-error" role="alert">重复文件扫描失败：{{ duplicates.error }}</p>
-          <p v-else-if="duplicates.errorCount" class="inline-error">有 {{ duplicates.errorCount }} 个文件无法读取，详情请查看运行日志。</p>
-          <details v-if="duplicates.groups?.length" class="duplicate-results"><summary>查看 {{ duplicates.duplicateGroups }} 组完全相同的文件</summary><article v-for="group in duplicates.groups" :key="group.sha256"><div><strong>{{ bytes(group.bytes) }} × {{ group.files.length }}</strong><small>可释放 {{ bytes(group.reclaimableBytes) }} · SHA-256 {{ group.sha256.slice(0, 12) }}…</small></div><code v-for="path in group.files" :key="path">{{ path }}</code></article></details>
+          <p v-else-if="duplicates.fingerprintWarning" class="inline-error">{{ duplicates.fingerprintWarning }}</p>
+          <p v-else-if="duplicates.errorCount" class="inline-error">有 {{ duplicates.errorCount }} 个文件未能完成全部检查，详情请查看运行日志。</p>
+          <details v-if="duplicates.groups?.length" class="duplicate-results"><summary>查看 {{ duplicates.duplicateGroups }} 组重复或疑似重复音乐</summary><article v-for="group in duplicates.groups" :key="group.matchType + group.files[0]"><div><strong>{{ bytes(group.bytes) }} × {{ group.files.length }}</strong><small>{{ group.matchType === 'EXACT' ? '文件内容完全一致' : 'Chromaprint 音频指纹相似' }} · 可释放约 {{ bytes(group.reclaimableBytes) }}</small></div><code v-for="path in group.files" :key="path">{{ path }}</code></article></details>
+          <div class="section-title inventory-title"><h2>扫描到的文件 <span>{{ inventory.total }}</span></h2><small>每页 50 个</small></div>
+          <form class="file-toolbar" @submit.prevent="searchInventory"><input v-model="fileQuery" placeholder="搜索文件路径、歌曲、歌手或专辑…" aria-label="搜索扫描文件"><select v-model="fileFilter" aria-label="筛选扫描文件" @change="searchInventory"><option value="ALL">全部文件</option><option value="ARCHIVED">已有归档记录</option><option value="UNTRACKED">仅存量文件</option><option value="DUPLICATE">重复副本</option></select><button>搜索</button></form>
+          <div v-if="!inventory.items?.length" class="empty compact"><span>⌕</span><h3>{{ fileQuery ? '没有匹配的扫描文件' : '尚未清点到音频文件' }}</h3><p>完成重复文件扫描后，存量音频会分页显示在这里。</p></div>
+          <div v-else class="table-wrap inventory-table"><table><thead><tr><th>文件路径</th><th>状态</th><th>大小</th><th>修改时间</th><th>内容指纹</th></tr></thead><tbody><tr v-for="file in inventory.items" :key="file.path"><td><strong>{{ file.name || file.path.split('/').pop() }}</strong><small v-if="file.song_id">{{ file.artist }} · {{ file.album }}</small><small class="path" :title="file.path">{{ file.path }}</small></td><td><span v-if="file.duplicate_count > 1" class="status FAILED">{{ file.match_type === 'EXACT' ? '完全相同' : '疑似同一音频' }} · {{ file.duplicate_count }} 个</span><span v-else-if="file.song_id" class="status DONE">已有归档记录</span><span v-else class="status PAUSED">仅存量文件</span></td><td>{{ bytes(file.bytes) }}</td><td>{{ date(file.modified_at) }}</td><td><code>音频 {{ audioFingerprint(file.audio_hash) }}</code><small>文件 {{ file.sha256.slice(0, 12) }}…</small></td></tr></tbody></table></div>
+          <nav v-if="inventory.totalPages > 1" class="pagination" aria-label="扫描文件分页"><button :disabled="filePage <= 1" @click="changeFilePage(filePage - 1)">上一页</button><span>第 {{ filePage }} / {{ inventory.totalPages }} 页</span><button :disabled="filePage >= inventory.totalPages" @click="changeFilePage(filePage + 1)">下一页</button></nav>
+          <div class="section-title archived-title"><h2>应用归档记录 <span>{{ library.length }}</span></h2></div>
           <input v-model="query" class="search" placeholder="搜索歌曲、歌手或专辑…" aria-label="搜索媒体库">
           <div v-if="!shownLibrary.length" class="empty"><span>♫</span><h3>{{ query ? '没有匹配的音乐' : '档案正在等待第一首音乐' }}</h3><p>完整下载并校验通过后，歌曲会出现在这里。</p></div>
           <div v-else class="table-wrap"><table><thead><tr><th>歌曲 / 专辑</th><th>音质</th><th>文件</th><th>归档时间</th><th></th></tr></thead><tbody><tr v-for="song in shownLibrary" :key="song.id"><td><strong>{{ song.name }}</strong><small>{{ song.artist }} · {{ song.album }}</small><small class="path" :title="song.path">{{ song.path }}</small><small v-if="song.metadata_warning" class="danger-text">{{ song.metadata_warning }}</small></td><td><span class="quality">{{ quality[song.level] || '未知档位' }}</span><small>{{ song.sample_rate ? `${song.sample_rate / 1000} kHz` : '采样率未知' }} {{ song.bits ? `/ ${song.bits} bit` : '' }}</small></td><td>{{ bytes(song.bytes) }}</td><td>{{ date(song.downloaded_at) }}</td><td><button :disabled="busy" @click="action(() => api(`/library/${song.id}/upgrade`, 'POST'), '已安排音质检查')">检查升级</button></td></tr></tbody></table></div>

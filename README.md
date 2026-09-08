@@ -14,7 +14,7 @@ Java 21 + Spring Boot + Vue 3 的网易云歌单监听与音乐归档应用。�
 - 仅当 MD5、大小、实际档位匹配时尝试 Range 续传；不支持 Range 则安全重下。链接过期会重新解析。
 - 文件长度/MD5（接口提供时）、音轨、时长验证，SHA-256 索引；ffmpeg 以 stream copy 写入基础标签，不重新编码。
 - 歌词、翻译/音译歌词、独立封面文件，M3U8 导出；跨歌单只存一份音频。
-- 启动后清点音乐目录中的现有音频，按 SHA-256 检查内容完全相同的重复文件；支持在音乐档案页手动重扫，不会自动删除文件。
+- 启动后清点音乐目录中的现有音频：SHA-256 确认文件完全相同，Chromaprint 音频指纹识别标签、容器或编码不同但声音内容相近的疑似副本；支持手动重扫、搜索及分页查看全部存量文件，不会自动删除文件。
 - 手动音质升级、可选每周自动升级、每日缺失文件检查和手动补下载。新文件成功提交后才删除旧音频。
 
 ## Docker Compose
@@ -86,6 +86,7 @@ java -jar target/neri-archive-0.1.0.jar
 | PORT | 8080 | 本地服务端口；Compose 中用于宿主端口 |
 | COOKIE_SECURE | false | HTTPS 部署设置 true |
 | FFMPEG / FFPROBE | ffmpeg / ffprobe | 媒体工具命令或绝对路径 |
+| FPCALC | fpcalc | Chromaprint 音频指纹工具命令或绝对路径；Docker 镜像已内置 |
 | ARCHIVE_SCHEDULING | true | 测试时可关闭后台调度 |
 | DUPLICATE_SCAN_ON_STARTUP | true | 服务启动后自动扫描现有音频文件；大型媒体库可关闭并改为手动扫描 |
 

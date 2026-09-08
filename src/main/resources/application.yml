@@ -30,5 +30,6 @@ archive:
   parallelism: ${DOWNLOAD_PARALLELISM:2}
   ffmpeg: ${FFMPEG:ffmpeg}
   ffprobe: ${FFPROBE:ffprobe}
+  fpcalc: ${FPCALC:fpcalc}
   scheduling: ${ARCHIVE_SCHEDULING:true}
   duplicate-scan-on-startup: ${DUPLICATE_SCAN_ON_STARTUP:true}

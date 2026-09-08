@@ -33,3 +33,8 @@ CREATE TABLE IF NOT EXISTS file_inventory (
  sha256 TEXT NOT NULL, scanned_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS file_inventory_hash ON file_inventory(sha256);
+CREATE TABLE IF NOT EXISTS audio_fingerprints (
+ path TEXT PRIMARY KEY, duration_seconds REAL NOT NULL, fingerprint_hash INTEGER NOT NULL,
+ group_id TEXT NOT NULL DEFAULT '', match_type TEXT NOT NULL DEFAULT '', scanned_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS audio_fingerprint_group ON audio_fingerprints(group_id);

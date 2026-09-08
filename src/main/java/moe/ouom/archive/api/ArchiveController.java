@@ -123,6 +123,14 @@ public class ArchiveController {
     @GetMapping("/api/library/duplicates")
     public Object duplicates() { return duplicates.report(); }
 
+    @GetMapping("/api/library/files")
+    public Object inventoryFiles(@RequestParam(defaultValue="1") int page,
+                                 @RequestParam(defaultValue="50") int pageSize,
+                                 @RequestParam(defaultValue="") String query,
+                                 @RequestParam(defaultValue="ALL") String filter) {
+        return store.fileInventoryPage(page,pageSize,query,filter);
+    }
+
     @PostMapping("/api/library/duplicates/scan")
     public Object scanDuplicates() {
         boolean started=duplicates.requestScan();

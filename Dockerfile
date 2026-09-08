@@ -15,7 +15,7 @@ COPY --from=frontend /build/dist/ src/main/resources/static/
 RUN mvn -B -q package
 
 FROM eclipse-temurin:21-jre-jammy
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg curl ca-certificates \
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg libchromaprint-tools curl ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 archive && useradd --uid 10001 --gid archive --no-create-home archive \
     && mkdir -p /app /data /music && chown archive:archive /app /data /music

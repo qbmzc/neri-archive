@@ -7,3 +7,15 @@
 .runtime-logs article div { display:flex; flex-wrap:wrap; gap:12px; font-size:12px; }
 .runtime-logs pre { white-space:pre-wrap; overflow-wrap:anywhere; font-size:13px; margin-bottom:0; }
 .log-ERROR { color:#a44132; } .log-WARN { color:#a86b33; }
+
+.duplicate-summary { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-bottom:18px; }
+.duplicate-summary>div { background:#fff; border:1px solid #dfe4d8; border-radius:14px; padding:16px; }
+.duplicate-summary span,.duplicate-summary small { display:block; color:#78806f; font-size:11px; }
+.duplicate-summary strong { display:inline-block; margin:8px 6px 4px 0; font-size:23px; }
+.duplicate-results { background:#fff; border:1px solid #dfe4d8; border-radius:14px; padding:16px; margin-bottom:18px; }
+.duplicate-results summary { cursor:pointer; font-weight:600; }
+.duplicate-results article { border-top:1px solid #e8ece3; padding:14px 0 4px; margin-top:14px; }
+.duplicate-results article div { display:flex; justify-content:space-between; gap:12px; margin-bottom:8px; }
+.duplicate-results article small { color:#78806f; }
+.duplicate-results code { display:block; overflow-wrap:anywhere; padding:5px 8px; background:#f5f7f1; border-radius:5px; margin-top:5px; font-size:11px; }
+@media(max-width:700px){.duplicate-summary{grid-template-columns:1fr}.duplicate-results article div{display:block}.duplicate-results article small{display:block;margin-top:4px}}

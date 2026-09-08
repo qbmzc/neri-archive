@@ -31,3 +31,4 @@ archive:
   ffmpeg: ${FFMPEG:ffmpeg}
   ffprobe: ${FFPROBE:ffprobe}
   scheduling: ${ARCHIVE_SCHEDULING:true}
+  duplicate-scan-on-startup: ${DUPLICATE_SCAN_ON_STARTUP:true}

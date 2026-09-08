@@ -9,6 +9,7 @@ import java.util.*;
 
 @Repository
 public class ArchiveStore {
+    public record InventoryEntry(String path,long bytes,long modifiedAt,String sha256,long scannedAt) {}
     private final JdbcTemplate db;
     private final TransactionTemplate tx;
     public ArchiveStore(JdbcTemplate db,PlatformTransactionManager tm) { this.db=db; tx=new TransactionTemplate(tm); }
@@ -21,6 +22,14 @@ public class ArchiveStore {
     private Map<String,Object> one(String sql,Object... args) { var rows=db.queryForList(sql,args); return rows.isEmpty()?Map.of():rows.getFirst(); }
     public List<Map<String,Object>> tasks() { return db.queryForList("SELECT t.*,s.name,s.artist FROM tasks t JOIN songs s ON t.song_id=s.id ORDER BY t.id DESC LIMIT 500"); }
     public List<Map<String,Object>> library() { return db.queryForList("SELECT * FROM songs WHERE path IS NOT NULL ORDER BY downloaded_at DESC"); }
+    public List<Map<String,Object>> fileInventory() { return db.queryForList("SELECT * FROM file_inventory ORDER BY path"); }
+    public synchronized void replaceFileInventory(List<InventoryEntry> entries) {
+        tx.executeWithoutResult(status -> {
+            db.update("DELETE FROM file_inventory");
+            for(var entry:entries) db.update("INSERT INTO file_inventory(path,bytes,modified_at,sha256,scanned_at) VALUES(?,?,?,?,?)",
+                    entry.path(),entry.bytes(),entry.modifiedAt(),entry.sha256(),entry.scannedAt());
+        });
+    }
     public List<Map<String,Object>> playlistSongs(long id) { return db.queryForList("SELECT s.* FROM members m JOIN songs s ON m.song_id=s.id WHERE m.playlist_id=? ORDER BY m.position",id); }
     public synchronized void subscribe(long id,int minutes,boolean initial,String policy,boolean upgrade) {
         if(id<=0||minutes<5||minutes>10080) throw new IllegalArgumentException("歌单 ID 无效或检查周期不在 5–10080 分钟内");

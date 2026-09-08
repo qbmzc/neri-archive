@@ -26,6 +26,7 @@ class StoreAndSecurityTest {
         p.add("archive.data",()->ROOT.toString()); p.add("archive.music",()->ROOT.resolve("music").toString());
         p.add("spring.datasource.url",()->"jdbc:sqlite:"+ROOT.resolve("test.db"));
         p.add("archive.admin-password",()->"test-password-only-123"); p.add("archive.scheduling",()->false);
+        p.add("archive.duplicate-scan-on-startup",()->false);
     }
     @Autowired ArchiveStore store;
     @Autowired JdbcTemplate db;
@@ -89,6 +90,10 @@ class StoreAndSecurityTest {
                 .content("{\"source\":\"12345\",\"intervalMinutes\":15,\"initialDownload\":true,\"policy\":\"FIDELITY\",\"autoUpgrade\":false}"))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.id").value(12345));
         mvc.perform(get("/api/csrf").with(user("admin"))).andExpect(jsonPath("$.token").isNotEmpty());
+        mvc.perform(get("/api/library/duplicates").with(user("admin")))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.duplicateGroups").value(0));
+        mvc.perform(post("/api/library/duplicates/scan").with(user("admin")).with(csrf()))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.started").value(true));
     }
     @Test void actualPasswordLoginWorks() throws Exception {
         mvc.perform(post("/login").with(csrf()).param("username","admin").param("password","test-password-only-123"))

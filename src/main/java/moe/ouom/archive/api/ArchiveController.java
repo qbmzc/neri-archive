@@ -18,12 +18,14 @@ public class ArchiveController {
     private final NeteaseGateway gateway;
     private final ArchiveEngine engine;
     private final MediaFiles files;
+    private final DuplicateFileService duplicates;
 
-    public ArchiveController(ArchiveStore store, NeteaseGateway gateway, ArchiveEngine engine, MediaFiles files) {
+    public ArchiveController(ArchiveStore store, NeteaseGateway gateway, ArchiveEngine engine, MediaFiles files, DuplicateFileService duplicates) {
         this.store = store;
         this.gateway = gateway;
         this.engine = engine;
         this.files = files;
+        this.duplicates = duplicates;
     }
 
     @GetMapping("/healthz")
@@ -116,6 +118,15 @@ public class ArchiveController {
     @PostMapping("/api/library/repair")
     public void repair() {
         engine.repairMissing();
+    }
+
+    @GetMapping("/api/library/duplicates")
+    public Object duplicates() { return duplicates.report(); }
+
+    @PostMapping("/api/library/duplicates/scan")
+    public Object scanDuplicates() {
+        boolean started=duplicates.requestScan();
+        return Map.of("started",started,"message",started?"已开始扫描现有音频文件":"扫描正在进行中");
     }
 
     @PostMapping("/api/library/{id}/upgrade")

@@ -28,3 +28,8 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_song ON tasks(song_id) WHERE status IN ('QUEUED','RUNNING','PAUSED','AUTH_REQUIRED');
 CREATE INDEX IF NOT EXISTS task_queue ON tasks(status,next_attempt);
+CREATE TABLE IF NOT EXISTS file_inventory (
+ path TEXT PRIMARY KEY, bytes INTEGER NOT NULL, modified_at INTEGER NOT NULL,
+ sha256 TEXT NOT NULL, scanned_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS file_inventory_hash ON file_inventory(sha256);

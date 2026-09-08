@@ -12,6 +12,7 @@ async function refreshLogs() {
 }
 watch([tab, logLevel], () => { if (tab.value === 'logs') void refreshLogs(); });
 const overview = ref<Row>({}); const subscriptions = ref<Row[]>([]); const tasks = ref<Row[]>([]); const library = ref<Row[]>([]);
+const duplicates = ref<Row>({ state: 'IDLE', groups: [] });
 const account = ref<Row | null>(null); const accountMessage = ref('尚未检查登录'); const loaded = ref(false); const busy = ref(false);
 const toast = ref(''); const query = ref(''); const filter = ref('ALL'); const cookie = ref(''); const modal = ref(false);
 const form = ref({ source: '', intervalMinutes: 15, initialDownload: true, policy: 'FIDELITY', autoUpgrade: false });
@@ -34,8 +35,8 @@ async function api(path: string, method = 'GET', data?: unknown) {
   return result;
 }
 async function refresh() {
-  const results = await Promise.all([api('/overview'), api('/subscriptions'), api('/tasks'), api('/library')]);
-  [overview.value, subscriptions.value, tasks.value, library.value] = results; loaded.value = true;
+  const results = await Promise.all([api('/overview'), api('/subscriptions'), api('/tasks'), api('/library'), api('/library/duplicates')]);
+  [overview.value, subscriptions.value, tasks.value, library.value, duplicates.value] = results; loaded.value = true;
 }
 async function checkAccount() {
   try { account.value = await api('/account'); accountMessage.value = '网易云已连接'; }
@@ -112,7 +113,15 @@ onUnmounted(() => { clearTimeout(refreshTimer); clearTimeout(qrTimer); clearTime
           <div class="task-list"><article v-for="task in shownTasks" :key="task.id" class="task-card"><div class="task-main"><div class="song-icon">♫</div><div class="song-name"><strong>{{ task.name }}</strong><small>{{ task.artist }} · #{{ task.id }}</small></div><span class="status" :class="task.status">{{ states[task.status] }}</span></div><div class="task-details"><span>请求 {{ quality[task.requested_level] || '待解析' }} <span class="separator">→</span> 实际 {{ quality[task.actual_level] || '待解析' }}</span><span>{{ bytes(task.bytes_done) }} / {{ task.total_bytes ? bytes(task.total_bytes) : '未知大小' }}</span></div><div class="progress"><div :style="{ width: percent(task) + '%' }"></div></div><p v-if="task.error" class="task-error">{{ task.error }}</p><div class="task-actions"><small>尝试 {{ task.attempts }} 次</small><button v-if="['RUNNING','QUEUED'].includes(task.status)" :disabled="busy" @click="action(() => api(`/tasks/${task.id}/pause`, 'POST'), '已暂停')">暂停</button><button v-if="['PAUSED','FAILED','CANCELLED','AUTH_REQUIRED'].includes(task.status)" :disabled="busy" @click="action(() => api(`/tasks/${task.id}/retry`, 'POST'), '已重新排队')">{{ task.status === 'PAUSED' ? '继续' : '重试' }}</button><button v-if="['RUNNING','QUEUED','PAUSED','AUTH_REQUIRED'].includes(task.status)" :disabled="busy" @click="action(() => api(`/tasks/${task.id}/cancel`, 'POST'), '已取消')">取消</button></div></article></div>
         </template>
         <template v-if="tab === 'library'">
-          <div class="page-heading"><div><div class="eyebrow">COLLECTION</div><h1>音乐档案</h1><p>文件保存在服务器音乐目录，每首歌曲只归档一份。</p></div><button class="secondary" :disabled="busy" @click="action(() => api('/library/repair', 'POST'), '缺失文件已加入补下载队列')">检查缺失文件</button></div>
+          <div class="page-heading"><div><div class="eyebrow">COLLECTION</div><h1>音乐档案</h1><p>文件保存在服务器音乐目录，每首歌曲只归档一份。</p></div><div class="button-row"><button class="secondary" :disabled="busy || duplicates.state === 'RUNNING'" @click="action(() => api('/library/duplicates/scan', 'POST'), '已开始扫描现有音频文件')">{{ duplicates.state === 'RUNNING' ? '正在扫描…' : '检查重复文件' }}</button><button class="secondary" :disabled="busy" @click="action(() => api('/library/repair', 'POST'), '缺失文件已加入补下载队列')">检查缺失文件</button></div></div>
+          <section class="duplicate-summary">
+            <div><span>已清点音频</span><strong>{{ duplicates.fileCount ?? 0 }}</strong><small>个文件</small></div>
+            <div><span>重复内容</span><strong>{{ duplicates.duplicateGroups ?? 0 }}</strong><small>组 / {{ duplicates.duplicateFiles ?? 0 }} 个副本</small></div>
+            <div><span>可释放空间</span><strong>{{ bytes(duplicates.reclaimableBytes) }}</strong><small>{{ duplicates.completedAt ? `上次完成 ${date(duplicates.completedAt)}` : '等待首次扫描' }}</small></div>
+          </section>
+          <p v-if="duplicates.error" class="task-error" role="alert">重复文件扫描失败：{{ duplicates.error }}</p>
+          <p v-else-if="duplicates.errorCount" class="inline-error">有 {{ duplicates.errorCount }} 个文件无法读取，详情请查看运行日志。</p>
+          <details v-if="duplicates.groups?.length" class="duplicate-results"><summary>查看 {{ duplicates.duplicateGroups }} 组完全相同的文件</summary><article v-for="group in duplicates.groups" :key="group.sha256"><div><strong>{{ bytes(group.bytes) }} × {{ group.files.length }}</strong><small>可释放 {{ bytes(group.reclaimableBytes) }} · SHA-256 {{ group.sha256.slice(0, 12) }}…</small></div><code v-for="path in group.files" :key="path">{{ path }}</code></article></details>
           <input v-model="query" class="search" placeholder="搜索歌曲、歌手或专辑…" aria-label="搜索媒体库">
           <div v-if="!shownLibrary.length" class="empty"><span>♫</span><h3>{{ query ? '没有匹配的音乐' : '档案正在等待第一首音乐' }}</h3><p>完整下载并校验通过后，歌曲会出现在这里。</p></div>
           <div v-else class="table-wrap"><table><thead><tr><th>歌曲 / 专辑</th><th>音质</th><th>文件</th><th>归档时间</th><th></th></tr></thead><tbody><tr v-for="song in shownLibrary" :key="song.id"><td><strong>{{ song.name }}</strong><small>{{ song.artist }} · {{ song.album }}</small><small class="path" :title="song.path">{{ song.path }}</small><small v-if="song.metadata_warning" class="danger-text">{{ song.metadata_warning }}</small></td><td><span class="quality">{{ quality[song.level] || '未知档位' }}</span><small>{{ song.sample_rate ? `${song.sample_rate / 1000} kHz` : '采样率未知' }} {{ song.bits ? `/ ${song.bits} bit` : '' }}</small></td><td>{{ bytes(song.bytes) }}</td><td>{{ date(song.downloaded_at) }}</td><td><button :disabled="busy" @click="action(() => api(`/library/${song.id}/upgrade`, 'POST'), '已安排音质检查')">检查升级</button></td></tr></tbody></table></div>

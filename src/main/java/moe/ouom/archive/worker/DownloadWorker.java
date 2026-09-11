@@ -36,6 +36,20 @@ public class DownloadWorker {
             var source=new QualitySelector().resolve(api,songId,policy);
             check(id);
             String existing=text(song,"path");
+            // 下载前决策：服务这次返回的档位不高于本地时，连传输都不必发生。
+            // 两端档位都已知才跳过；任一端未知就放行，交由下载后的实测裁决，
+            // 保持 README 的承诺——未知档位不会自动替换已知档位文件。
+            // 本地文件已缺失（repairMissing 的补下载场景）时同样放行：此时 songs.level
+            // 描述的是一个已经不存在的文件，拿它比较会让补下载被静默跳过。
+            String localLevel=text(song,"level");
+            if(number(task,"forced")==0&&localFilePresent(existing)
+                    &&QualitySelector.known(localLevel,policy)&&QualitySelector.known(source.actual(),policy)
+                    &&!QualitySelector.better(source.actual(),localLevel,policy)) {
+                String reason="服务返回档位 "+source.actual()+" 不高于本地 "+localLevel+"，未下载";
+                log.info("下载任务 #{} 跳过：{}",id,reason);
+                store.outcome(id,"SKIPPED",reason,0);
+                return;
+            }
             stage="传输音频";
             transfer(id,source,part,signature);
             transferred=true;
@@ -55,7 +69,7 @@ public class DownloadWorker {
                 check(id);
                 stage="比较已有文件";
                 var versions=files.versions(song,probe.extension(),relative);
-                Path selected=MediaFiles.largest(finished,versions);
+                Path selected=selectRetained(finished,probe,versions,song,existing);
                 String actual=source.actual();
                 if(!selected.equals(finished)) {
                     // Read metadata from the file we keep, never from the discarded download.
@@ -64,7 +78,7 @@ public class DownloadWorker {
                     relative=files.root.relativize(selected).toString();
                     actual=relative.equals(existing)?text(song,"level"):"unknown";
                     warning=relative.equals(existing)?text(song,"metadata_warning"):"";
-                    log.info("下载任务 #{} 保留已有文件（{} 字节 >= 新文件 {} 字节）：{}",id,Files.size(selected),Files.size(finished),relative);
+                    log.info("下载任务 #{} 保留已有文件（实测音质不劣于新下载）：{}",id,relative);
                 } else {
                     stage="归档文件";
                     MediaFiles.move(finished,files.safe(relative));
@@ -73,12 +87,10 @@ public class DownloadWorker {
                 stage="更新数据库";
                 store.complete(id,songId,relative,actual,Files.size(files.safe(relative)),hash,probe.rate(),probe.bits(),probe.bitrate(),warning);
                 // Only remove superseded versions after the database references the retained file.
+                // 被替换的文件进回收站而不是直接删除，移动失败时保留原地，绝不删除。
                 Path retained=files.safe(relative);
                 for(Path version:versions) {
-                    if(!version.equals(retained)) {
-                        try { Files.deleteIfExists(version); }
-                        catch(IOException e) { log.warn("任务 #{} 清理较小文件失败：{}",id,safeError(e)); }
-                    }
+                    if(!version.equals(retained)) files.moveToTrash(version,songId);
                 }
             }
             Files.deleteIfExists(part); Files.deleteIfExists(signature);
@@ -105,6 +117,45 @@ public class DownloadWorker {
                 String state=text(store.task(id),"status");
                 if(state.equals("CANCELLED")||state.equals("DONE")) { Files.deleteIfExists(part); Files.deleteIfExists(signature); }
             } catch(IOException ignored) {}
+        }
+    }
+    /** 归档记录指向的文件是否真的还在盘上。路径非法时按缺失处理。 */
+    boolean localFilePresent(String path) {
+        if(path.isBlank()) return false;
+        try { return Files.isRegularFile(files.safe(path),LinkOption.NOFOLLOW_LINKS); }
+        catch(IOException e) { return false; }
+    }
+    /**
+     * 决定保留新下载的文件还是已有文件。
+     *
+     * <p>判据是实测音质（无损/有损 → 采样率 → 位深 → 码率），不是字节数：字节数对
+     * 「网易云把有损转码后标记为无损返回」这一场景会稳定选错，把真 320 换成假无损。
+     * 音质等价时保留已有文件，避免重复下载产生抖动。
+     */
+    Path selectRetained(Path incoming,MediaFiles.Probe probe,List<Path> versions,Map<String,Object> song,String existing) throws Exception {
+        QualityComparator.Profile best=QualityComparator.profile(probe);
+        Path existingPath=existing.isBlank()?null:files.safe(existing);
+        Path selected=incoming;
+        for(Path version:versions) {
+            QualityComparator.Profile candidate=qualityOf(version,song,existingPath);
+            if(candidate==null) continue;
+            int comparison=QualityComparator.compare(candidate,best);
+            if(comparison>0||(comparison==0&&selected.equals(incoming))) { selected=version; best=candidate; }
+        }
+        return selected;
+    }
+    /** 已有文件优先使用 songs 行里已存的探测规格，避免重复调用 ffprobe。 */
+    private QualityComparator.Profile qualityOf(Path version,Map<String,Object> song,Path existingPath) {
+        try {
+            if(version.equals(existingPath)) {
+                QualityComparator.Profile stored=QualityComparator.stored(text(song,"path"),
+                        (int)number(song,"sample_rate"),(int)number(song,"bits"),(int)number(song,"bitrate"));
+                if(stored!=null) return stored;
+            }
+            return QualityComparator.profile(files.probe(version,0));
+        } catch(Exception e) {
+            log.debug("无法读取已有文件的音质，跳过比较 {}：{}",version,safeError(e));
+            return null;
         }
     }
     static String safeError(Exception e) {

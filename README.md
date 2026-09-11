@@ -15,7 +15,9 @@ Java 21 + Spring Boot + Vue 3 的网易云歌单监听与音乐归档应用。�
 - 文件长度/MD5（接口提供时）、音轨、时长验证，SHA-256 索引；ffmpeg 以 stream copy 写入基础标签，不重新编码。
 - 歌词、翻译/音译歌词、独立封面文件，M3U8 导出；跨歌单只存一份音频。
 - 启动后清点音乐目录中的现有音频：SHA-256 确认文件完全相同，Chromaprint 音频指纹识别标签、容器或编码不同但声音内容相近的疑似副本；支持手动重扫、搜索及分页查看全部存量文件，不会自动删除文件。
-- 手动音质升级、可选每周自动升级、每日缺失文件检查和手动补下载。新文件成功提交后才删除旧音频。
+- 音乐档案页只有一张表，一行一个音频文件：已归档、仅存量文件和文件缺失三类用状态列区分。新下载的歌曲无需等待扫描即可出现，缺失的文件带行内补下载入口。
+- 手动音质升级、可选每周自动升级、每日缺失文件检查和手动补下载。升级决策分两级：入队前跳过已到策略顶档的歌，下载前跳过服务未返回更高档位的歌（跳过原因显示为「已跳过」，可强制重下）；下载后按实测音质（无损/有损、采样率、位深、码率）决定保留哪个文件，而不是按文件大小。
+- 被替换的旧音频移入回收站而不是直接删除，默认保留 7 天后清理。任何情况下回收站移动失败都会保留原文件。
 
 ## Docker Compose
 
@@ -50,7 +52,7 @@ Dockerfile 使用可供 amd64/arm64 构建的基础镜像；双架构实际镜�
 
 ```sh
 docker pull ghcr.io/qbmzc/neri-archive:latest
-# 或指定版本镜像 ghcr.io/qbmzc/neri-archive:0.1.0
+# 或指定版本镜像 ghcr.io/qbmzc/neri-archive:0.2.0
 ```
 
 ## 本地 Java 开发
@@ -63,14 +65,14 @@ docker pull ghcr.io/qbmzc/neri-archive:latest
 # 本次环境已准备项目内 Maven 时，可使用：
 # .\build.ps1 -Maven "$PWD\.tools\apache-maven-3.9.9\bin\mvn.cmd"
 $env:ADMIN_PASSWORD = '请替换成你自己的长密码'
-java -jar target/neri-archive-0.1.0.jar
+java -jar target/neri-archive-0.2.0.jar
 ```
 
 ```sh
 # Linux / macOS
 sh build.sh
 export ADMIN_PASSWORD='replace-with-your-own-long-password'
-java -jar target/neri-archive-0.1.0.jar
+java -jar target/neri-archive-0.2.0.jar
 ```
 
 单独运行 `mvn test` 执行后端测试。`frontend` 内执行 `npm run build` 进行 TypeScript 检查与构建。`npm run dev` 只用于前端开发，API 代理到 8080；完整登录与同源验收以打包后的 8080 服务为准。
@@ -82,6 +84,8 @@ java -jar target/neri-archive-0.1.0.jar
 | ADMIN_PASSWORD | 必填，至少 12 字符 | 管理员密码，无公共默认密码 |
 | ARCHIVE_DATA | ./data | SQLite 和加密凭据；容器固定为 /data |
 | ARCHIVE_MUSIC | ./music | 音乐目录；容器固定为 /music |
+| ARCHIVE_TRASH | 空 | 被替换文件的回收站；留空为 `<ARCHIVE_MUSIC>/.trash`。指向音乐目录之外时需在 Compose 中额外挂卷 |
+| SUPERSEDED_RETENTION_DAYS | 7 | 回收站保留天数；0 表示不保留（被替换的文件直接删除） |
 | DOWNLOAD_PARALLELISM | 2 | 下载并发，限制 1–8 |
 | PORT | 8080 | 本地服务端口；Compose 中用于宿主端口 |
 | COOKIE_SECURE | false | HTTPS 部署设置 true |
@@ -107,7 +111,9 @@ java -jar target/neri-archive-0.1.0.jar
 - 失败任务最多自动尝试 5 次，登录失效任务在重新连接账号后恢复。重新扫描不会无限重试已有失败任务，可在队列手动重试。
 - 下载过程中断后可恢复任务；只有服务器资源身份与续传响应可验证时才复用部分数据，否则重新下载。
 - 进程在文件移动与数据库提交之间崩溃，可能留下未被引用的完整文件；不会将半成品记为成功。当前没有自动清理此类孤立文件及旧版本 sidecar，避免误删用户文件。
-- 当前列表适合个人规模；下载历史展示最近 500 项，媒体库未实现服务端分页。
+- 回收站位于 `<ARCHIVE_MUSIC>/.trash/<歌曲ID>/`，文件名带时间戳前缀，按修改时间到期清理；它不参与扫描，也不出现在音乐档案页。恢复方式是把文件移回原目录，本应用不提供回收站界面。
+- 下载前跳过「同档位无需下载」需要两端档位都已知；任一端未知、或本地文件已缺失时都会照常下载。未知档位永远不会自动替换已知档位文件。
+- 当前列表适合个人规模；下载历史展示最近 500 项，音乐档案页每页 50 个且支持服务端搜索与筛选。
 
 ## 许可
 

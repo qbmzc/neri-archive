@@ -23,6 +23,8 @@ public class DuplicateFileService {
     private static final Set<String> AUDIO_EXTENSIONS=Set.of("flac","mp3","m4a","aac","wav","ogg","opus","wma","ape","aif","aiff","alac","dsf","dff","mka");
     private static final Pattern DURATION=Pattern.compile("(?m)^DURATION=([0-9]+(?:\\.[0-9]+)?)$");
     private static final Pattern FINGERPRINT=Pattern.compile("(?m)^FINGERPRINT=([0-9,]+)$");
+    private static final int MAX_ALIGNMENT_OFFSET=12;
+    private static final double MAX_AUDIO_BIT_ERROR_RATE=0.10;
     private final ArchiveStore store;
     private final MediaFiles files;
     private final boolean scanOnStartup;
@@ -62,11 +64,15 @@ public class DuplicateFileService {
     void scanNow() throws Exception {
         Map<String,Map<String,Object>> previous=new HashMap<>();
         for(var row:store.fileInventory()) previous.put(text(row,"path"),row);
+        // 扫描已经走遍音乐目录，顺手把「文件属于哪首歌」解析出来落成整数列，
+        // 查询时就能用 song_id 等值连接，不必再做路径字符串匹配。
+        Map<String,Long> songByPath=new HashMap<>();
+        for(var song:store.library()) songByPath.put(text(song,"path").replace('\\','/'),number(song,"id"));
         List<InventoryEntry> snapshot=new ArrayList<>();
         int failures=0;
         long now=System.currentTimeMillis();
         boolean audioFingerprinting=fpcalcAvailable();
-        fingerprintWarning=audioFingerprinting?"":"未找到 fpcalc，本次只能识别文件内容完全相同的副本";
+        fingerprintWarning=audioFingerprinting?"":"未找到 fpcalc，新文件或已变化文件只能检查 SHA-256";
         if(!audioFingerprinting) log.warn(fingerprintWarning);
         try(var paths=Files.walk(files.root)) {
             var iterator=paths.iterator();
@@ -81,21 +87,20 @@ public class DuplicateFileService {
                     var old=previous.get(relative);
                     boolean unchanged=old!=null&&number(old,"bytes")==bytes&&number(old,"modified_at")==modified;
                     String hash=unchanged?text(old,"sha256"):MediaFiles.hash(path,"SHA-256");
-                    long audioHash=-1; double duration=0;
-                    if(audioFingerprinting) {
-                        if(unchanged&&number(old,"audio_hash")>=0) {
+                    long audioHash=-1; double duration=0; String rawFingerprint="";
+                    if(unchanged&&number(old,"audio_hash")>=0&&!text(old,"audio_fingerprint").isBlank()) {
                             audioHash=number(old,"audio_hash");
                             Object value=old.get("audio_duration"); duration=value instanceof Number n?n.doubleValue():0;
-                        } else {
+                            rawFingerprint=text(old,"audio_fingerprint");
+                    } else if(audioFingerprinting) {
                             try {
-                                var fingerprint=fingerprint(path); audioHash=fingerprint.hash(); duration=fingerprint.duration();
+                                var fingerprint=fingerprint(path); audioHash=fingerprint.hash(); duration=fingerprint.duration(); rawFingerprint=fingerprint.raw();
                             } catch(Exception e) {
                                 failures++;
                                 log.warn("文件 SHA-256 已记录，但音频指纹生成失败 {}：{}",relative,DownloadWorker.safeError(e));
                             }
-                        }
                     }
-                    snapshot.add(new InventoryEntry(relative,bytes,modified,hash,audioHash,duration,"","",now));
+                    snapshot.add(new InventoryEntry(relative,bytes,modified,hash,audioHash,duration,rawFingerprint,"","",songByPath.get(relative),now));
                 } catch(Exception e) {
                     failures++;
                     log.warn("跳过无法检查的音频文件 {}：{}",files.root.relativize(path),DownloadWorker.safeError(e));
@@ -110,7 +115,7 @@ public class DuplicateFileService {
                 snapshot.size(),groups(snapshot).size(),failures,audioFingerprinting?"Chromaprint 音频指纹 + SHA-256":"SHA-256");
     }
 
-    record Fingerprint(double duration,long hash) {}
+    record Fingerprint(double duration,long hash,String raw) {}
 
     Fingerprint fingerprint(Path path) throws Exception {
         Path output=Files.createTempFile(files.safe(".work"),"fpcalc-",".log");
@@ -131,7 +136,7 @@ public class DuplicateFileService {
             }
             int simHash=0,threshold=values.length/2;
             for(int bit=0;bit<32;bit++) if(bits[bit]>threshold) simHash|=1<<bit;
-            return new Fingerprint(Double.parseDouble(durationMatch.group(1)),Integer.toUnsignedLong(simHash));
+            return new Fingerprint(Double.parseDouble(durationMatch.group(1)),Integer.toUnsignedLong(simHash),fingerprintMatch.group(1));
         } finally {
             if(process!=null&&process.isAlive()) process.destroyForcibly();
             Files.deleteIfExists(output);
@@ -146,38 +151,60 @@ public class DuplicateFileService {
     }
 
     static List<InventoryEntry> assignDuplicateGroups(List<InventoryEntry> entries) {
-        int[] parent=new int[entries.size()];
-        for(int i=0;i<parent.length;i++) parent[i]=i;
-        for(int i=0;i<entries.size();i++) for(int j=i+1;j<entries.size();j++) {
-            var left=entries.get(i); var right=entries.get(j);
-            boolean exact=left.sha256().equals(right.sha256());
-            boolean sameAudio=left.audioHash()>=0&&right.audioHash()>=0&&Math.abs(left.audioDuration()-right.audioDuration())<=3
-                    &&Integer.bitCount((int)left.audioHash()^(int)right.audioHash())<=3;
-            if(exact||sameAudio) union(parent,i,j);
-        }
-        Map<Integer,List<Integer>> components=new LinkedHashMap<>();
-        for(int i=0;i<entries.size();i++) components.computeIfAbsent(find(parent,i),ignored->new ArrayList<>()).add(i);
+        int[][] fingerprints=entries.stream().map(entry->parseFingerprint(entry.audioFingerprint())).toArray(int[][]::new);
         List<InventoryEntry> result=new ArrayList<>(entries); int groupNumber=0;
-        for(var indexes:components.values()) {
+        boolean[] grouped=new boolean[entries.size()];
+        for(int i=0;i<entries.size();i++) {
+            if(grouped[i]) continue;
+            List<Integer> indexes=new ArrayList<>(); indexes.add(i);
+            for(int j=i+1;j<entries.size();j++) {
+                if(grouped[j]) continue;
+                var left=entries.get(i); var right=entries.get(j);
+                boolean exact=left.sha256().equals(right.sha256());
+                boolean sameAudio=!exact&&left.audioHash()>=0&&right.audioHash()>=0
+                        &&Math.abs(left.audioDuration()-right.audioDuration())<=3
+                        &&Integer.bitCount((int)left.audioHash()^(int)right.audioHash())<=3
+                        &&fingerprintsMatch(fingerprints[i],fingerprints[j]);
+                if(exact||sameAudio) indexes.add(j);
+            }
             if(indexes.size()<2) continue;
-            boolean exact=indexes.stream().map(i->entries.get(i).sha256()).distinct().count()==1;
+            boolean exact=indexes.stream().map(index->entries.get(index).sha256()).distinct().count()==1;
             String type=exact?"EXACT":"AUDIO",group=(exact?"exact-":"audio-")+(++groupNumber);
             for(int index:indexes) {
                 var e=entries.get(index);
-                result.set(index,new InventoryEntry(e.path(),e.bytes(),e.modifiedAt(),e.sha256(),e.audioHash(),e.audioDuration(),group,type,e.scannedAt()));
+                grouped[index]=true;
+                result.set(index,new InventoryEntry(e.path(),e.bytes(),e.modifiedAt(),e.sha256(),e.audioHash(),e.audioDuration(),e.audioFingerprint(),group,type,e.songId(),e.scannedAt()));
             }
         }
         return result;
     }
 
-    private static int find(int[] parent,int value) {
-        while(parent[value]!=value) { parent[value]=parent[parent[value]]; value=parent[value]; }
-        return value;
+    private static int[] parseFingerprint(String value) {
+        if(value==null||value.isBlank()) return new int[0];
+        try {
+            String[] values=value.split(","); int[] result=new int[values.length];
+            for(int i=0;i<values.length;i++) result[i]=(int)Long.parseUnsignedLong(values[i]);
+            return result;
+        } catch(NumberFormatException ignored) { return new int[0]; }
     }
-    private static void union(int[] parent,int left,int right) { parent[find(parent,left)]=find(parent,right); }
+
+    static boolean fingerprintsMatch(int[] left,int[] right) {
+        int shortest=Math.min(left.length,right.length);
+        if(shortest<80||shortest*10<Math.max(left.length,right.length)*9) return false;
+        double best=1;
+        for(int offset=-MAX_ALIGNMENT_OFFSET;offset<=MAX_ALIGNMENT_OFFSET;offset++) {
+            int leftStart=Math.max(0,-offset),rightStart=Math.max(0,offset);
+            int overlap=Math.min(left.length-leftStart,right.length-rightStart);
+            if(overlap<80) continue;
+            long differentBits=0;
+            for(int i=0;i<overlap;i++) differentBits+=Integer.bitCount(left[leftStart+i]^right[rightStart+i]);
+            best=Math.min(best,differentBits/(overlap*32.0));
+        }
+        return best<=MAX_AUDIO_BIT_ERROR_RATE;
+    }
 
     private boolean isAudio(Path path) {
-        if(path.startsWith(files.root.resolve(".work"))||Files.isSymbolicLink(path)) return false;
+        if(Files.isSymbolicLink(path)||files.isIgnored(path)) return false;
         String name=Objects.toString(path.getFileName(),"");
         int dot=name.lastIndexOf('.');
         return dot>=0&&AUDIO_EXTENSIONS.contains(name.substring(dot+1).toLowerCase(Locale.ROOT));
@@ -186,7 +213,8 @@ public class DuplicateFileService {
     public Map<String,Object> report() {
         List<InventoryEntry> entries=store.fileInventory().stream().map(row -> new InventoryEntry(
                 text(row,"path"),number(row,"bytes"),number(row,"modified_at"),text(row,"sha256"),number(row,"audio_hash"),
-                row.get("audio_duration") instanceof Number n?n.doubleValue():0,text(row,"duplicate_group"),text(row,"match_type"),number(row,"scanned_at"))).toList();
+                row.get("audio_duration") instanceof Number n?n.doubleValue():0,text(row,"audio_fingerprint"),text(row,"duplicate_group"),text(row,"match_type"),
+                row.get("song_id") instanceof Number id?id.longValue():null,number(row,"scanned_at"))).toList();
         List<Map<String,Object>> groups=groups(entries);
         long duplicateFiles=groups.stream().mapToLong(g->((List<?>)g.get("files")).size()-1).sum();
         long reclaimable=groups.stream().mapToLong(g->number(g,"reclaimableBytes")).sum();

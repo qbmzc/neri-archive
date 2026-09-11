@@ -110,11 +110,6 @@ public class ArchiveController {
         engine.control(id, action);
     }
 
-    @GetMapping("/api/library")
-    public Object library() {
-        return store.library();
-    }
-
     @PostMapping("/api/library/repair")
     public void repair() {
         engine.repairMissing();

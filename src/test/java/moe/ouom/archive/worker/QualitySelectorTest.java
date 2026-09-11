@@ -32,6 +32,26 @@ class QualitySelectorTest {
         assertFalse(QualitySelector.better("sky","hires","FIDELITY"));
         assertTrue(QualitySelector.better("sky","hires","SURROUND"));
     }
+    @Test void upgradeableReportsWhetherThePolicyHasRoomLeft() {
+        // 已是策略顶档：每周自动升级不应再为它产生任务。
+        assertFalse(QualitySelector.upgradeable("jymaster","FIDELITY"));
+        assertTrue(QualitySelector.upgradeable("lossless","FIDELITY"));
+        assertTrue(QualitySelector.upgradeable("standard","FIDELITY"));
+        // 同一档位在不同策略下的位置不同。
+        assertTrue(QualitySelector.upgradeable("jymaster","SURROUND"));
+        assertFalse(QualitySelector.upgradeable("sky","SURROUND"));
+        // 空或未知档位保守放行，避免误判成「已到顶」而永远不再升级。
+        assertTrue(QualitySelector.upgradeable("unknown","FIDELITY"));
+        assertTrue(QualitySelector.upgradeable("","FIDELITY"));
+        assertTrue(QualitySelector.upgradeable(null,"FIDELITY"));
+    }
+    @Test void onlyKnownLevelsAreEligibleForSkipping() {
+        assertTrue(QualitySelector.known("lossless","FIDELITY"));
+        assertFalse(QualitySelector.known("unknown","FIDELITY"));
+        assertFalse(QualitySelector.known("","FIDELITY"));
+        assertFalse(QualitySelector.known("sky","FIDELITY"));
+        assertTrue(QualitySelector.known("sky","SURROUND"));
+    }
     abstract static class FakeGateway implements MusicGateway {
         public Playlist playlist(long id) { throw new UnsupportedOperationException(); }
         public JsonNode lyrics(long id) { return new ObjectMapper().createObjectNode(); }

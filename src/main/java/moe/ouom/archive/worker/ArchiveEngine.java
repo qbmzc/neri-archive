@@ -52,10 +52,17 @@ public class ArchiveEngine {
             catch(Exception e) { log.warn("歌单 {} 扫描失败：{}",number(sub,"id"),DownloadWorker.safeError(e)); store.scanFailure(number(sub,"id"),DownloadWorker.safeError(e)); }
         }
         exportPlaylists();
-        if(now-lastRepair>24L*3600*1000) { repairMissing(); lastRepair=now; }
+        if(now-lastRepair>24L*3600*1000) { repairMissing(); cleanupTrash(); lastRepair=now; }
+    }
+    /** 回收站清理与缺失文件检查一样按天执行，不新起调度器。 */
+    void cleanupTrash() {
+        try {
+            int removed=files.cleanupTrash();
+            if(removed>0) log.info("回收站清理：删除 {} 个超过保留期的文件",removed);
+        } catch(Exception e) { log.warn("回收站清理失败：{}",DownloadWorker.safeError(e)); }
     }
     public synchronized void control(long id,String action) {
-        if(action.equals("retry")&&running.contains(id)) throw new IllegalArgumentException("任务正在停止，请稍后再继续");
+        if((action.equals("retry")||action.equals("force"))&&running.contains(id)) throw new IllegalArgumentException("任务正在停止，请稍后再继续");
         store.control(id,action);
     }
     public void repairMissing() {

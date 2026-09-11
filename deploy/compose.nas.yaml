@@ -7,7 +7,7 @@ name: neri-archive
 
 services:
   archive:
-    image: ghcr.io/qbmzc/neri-archive:v0.1.0
+    image: ghcr.io/qbmzc/neri-archive:v0.2.0
     container_name: neri-archive
     restart: unless-stopped
     init: true
@@ -18,6 +18,8 @@ services:
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?请在 .env 中设置 ADMIN_PASSWORD（至少 12 字符）}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       DOWNLOAD_PARALLELISM: ${DOWNLOAD_PARALLELISM:-2}
+      ARCHIVE_TRASH: ${ARCHIVE_TRASH:-}
+      SUPERSEDED_RETENTION_DAYS: ${SUPERSEDED_RETENTION_DAYS:-7}
       TZ: ${TZ:-Asia/Shanghai}
     volumes:
       - ./data:/data

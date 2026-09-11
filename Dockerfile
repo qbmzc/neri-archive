@@ -12,7 +12,10 @@ RUN mvn -B -q dependency:go-offline
 COPY src/ src/
 COPY LICENSE NOTICE ./
 COPY --from=frontend /build/dist/ src/main/resources/static/
-RUN mvn -B -q package
+# 不写死版本号：一旦写死的 jar 名与 pom 版本不一致，镜像构建会直接失败。
+# 排除 spring-boot-maven-plugin 生成的 .original 备份。
+RUN mvn -B -q package \
+    && find target -maxdepth 1 -name 'neri-archive-*.jar' ! -name '*.original' -exec cp {} /build/app.jar \;
 
 FROM eclipse-temurin:21-jre-jammy
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg libchromaprint-tools curl ca-certificates \
@@ -20,7 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg libchrom
     && groupadd --gid 10001 archive && useradd --uid 10001 --gid archive --no-create-home archive \
     && mkdir -p /app /data /music && chown archive:archive /app /data /music
 WORKDIR /app
-COPY --from=backend /build/target/neri-archive-0.1.0.jar app.jar
+COPY --from=backend /build/app.jar app.jar
 ENV ARCHIVE_DATA=/data ARCHIVE_MUSIC=/music JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=70"
 USER 10001:10001
 EXPOSE 8080

@@ -1,6 +1,8 @@
 package moe.ouom.archive.store;
 
 import moe.ouom.archive.netease.MusicGateway.*;
+// 档位序列是纯策略函数，放在 worker 包；这里引用它做入队前的可升级判断。
+import moe.ouom.archive.worker.QualitySelector;
 import org.springframework.stereotype.Repository;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -9,8 +11,8 @@ import java.util.*;
 
 @Repository
 public class ArchiveStore {
-    public record InventoryEntry(String path,long bytes,long modifiedAt,String sha256,long audioHash,double audioDuration,
-                                 String duplicateGroup,String matchType,long scannedAt) {}
+    public record InventoryEntry(String path,long bytes,long modifiedAt,String sha256,long audioHash,double audioDuration,String audioFingerprint,
+                                 String duplicateGroup,String matchType,Long songId,long scannedAt) {}
     private final JdbcTemplate db;
     private final TransactionTemplate tx;
     public ArchiveStore(JdbcTemplate db,PlatformTransactionManager tm) { this.db=db; tx=new TransactionTemplate(tm); }
@@ -23,42 +25,54 @@ public class ArchiveStore {
     private Map<String,Object> one(String sql,Object... args) { var rows=db.queryForList(sql,args); return rows.isEmpty()?Map.of():rows.getFirst(); }
     public List<Map<String,Object>> tasks() { return db.queryForList("SELECT t.*,s.name,s.artist FROM tasks t JOIN songs s ON t.song_id=s.id ORDER BY t.id DESC LIMIT 500"); }
     public List<Map<String,Object>> library() { return db.queryForList("SELECT * FROM songs WHERE path IS NOT NULL ORDER BY downloaded_at DESC"); }
-    public List<Map<String,Object>> fileInventory() { return db.queryForList("SELECT f.*,COALESCE(a.duration_seconds,0) AS audio_duration,COALESCE(a.fingerprint_hash,-1) AS audio_hash,COALESCE(a.group_id,'') AS duplicate_group,COALESCE(a.match_type,'') AS match_type FROM file_inventory f LEFT JOIN audio_fingerprints a ON a.path=f.path ORDER BY f.path"); }
+    public List<Map<String,Object>> fileInventory() { return db.queryForList("SELECT f.*,COALESCE(a.duration_seconds,0) AS audio_duration,COALESCE(a.fingerprint_hash,-1) AS audio_hash,COALESCE(d.raw_fingerprint,'') AS audio_fingerprint,COALESCE(a.group_id,'') AS duplicate_group,COALESCE(a.match_type,'') AS match_type FROM file_inventory f LEFT JOIN audio_fingerprints a ON a.path=f.path LEFT JOIN audio_fingerprint_data d ON d.path=f.path ORDER BY f.path"); }
     public Map<String,Object> fileInventoryPage(int requestedPage,int requestedPageSize,String requestedQuery,String requestedFilter) {
         int page=Math.max(1,requestedPage),pageSize=Math.clamp(requestedPageSize,10,100);
         String query=Objects.toString(requestedQuery,"").trim().toLowerCase(Locale.ROOT);
         String filter=Objects.toString(requestedFilter,"ALL").toUpperCase(Locale.ROOT);
-        if(!Set.of("ALL","ARCHIVED","UNTRACKED","DUPLICATE").contains(filter)) throw new IllegalArgumentException("文件筛选条件无效");
+        if(!Set.of("ALL","ARCHIVED","UNTRACKED","MISSING","DUPLICATE").contains(filter)) throw new IllegalArgumentException("文件筛选条件无效");
+        // 统一视图：一行 = 一个音频文件。全外连接把「已归档」「仅存量文件」「文件缺失」三类行合并到一张表。
+        // song_id 由扫描时解析写入，是整数列等值连接，不再用 replace(s.path,...) 做路径字符串匹配。
+        String path="COALESCE(f.path,replace(s.path,'\\','/'))";
+        String from=" FROM (SELECT * FROM songs WHERE path IS NOT NULL) s"
+                +" FULL OUTER JOIN file_inventory f ON f.song_id=s.id"
+                +" LEFT JOIN audio_fingerprints a ON a.path=f.path";
         StringBuilder where=new StringBuilder(" WHERE 1=1");
         List<Object> args=new ArrayList<>();
         if(!query.isBlank()) {
-            where.append(" AND (lower(f.path) LIKE ? ESCAPE '\\' OR lower(COALESCE(s.name,'')) LIKE ? ESCAPE '\\' OR lower(COALESCE(s.artist,'')) LIKE ? ESCAPE '\\' OR lower(COALESCE(s.album,'')) LIKE ? ESCAPE '\\')");
+            where.append(" AND (lower(").append(path).append(") LIKE ? ESCAPE '\\' OR lower(COALESCE(s.name,'')) LIKE ? ESCAPE '\\' OR lower(COALESCE(s.artist,'')) LIKE ? ESCAPE '\\' OR lower(COALESCE(s.album,'')) LIKE ? ESCAPE '\\')");
             String pattern="%"+query.replace("\\","\\\\").replace("%","\\%").replace("_","\\_")+"%";
             for(int i=0;i<4;i++) args.add(pattern);
         }
         switch(filter) {
-            case "ARCHIVED" -> where.append(" AND s.id IS NOT NULL");
+            case "ARCHIVED" -> where.append(" AND s.id IS NOT NULL AND f.path IS NOT NULL");
             case "UNTRACKED" -> where.append(" AND s.id IS NULL");
-            case "DUPLICATE" -> where.append(" AND a.group_id<>''");
+            case "MISSING" -> where.append(" AND s.id IS NOT NULL AND f.path IS NULL");
+            case "DUPLICATE" -> where.append(" AND a.group_id IS NOT NULL AND a.group_id<>''");
         }
-        String from=" FROM file_inventory f LEFT JOIN audio_fingerprints a ON a.path=f.path LEFT JOIN songs s ON replace(s.path,'\\','/')=f.path";
         long total=db.queryForObject("SELECT count(*)"+from+where,Long.class,args.toArray());
         int totalPages=Math.max(1,(int)Math.ceil(total/(double)pageSize));
         page=Math.min(page,totalPages);
         List<Object> pageArgs=new ArrayList<>(args); pageArgs.add(pageSize); pageArgs.add((page-1)*pageSize);
-        String select="SELECT f.*,s.id AS song_id,s.name,s.artist,s.album,a.duration_seconds AS audio_duration,a.fingerprint_hash AS audio_hash,a.match_type,"+
-                "CASE WHEN a.group_id='' OR a.group_id IS NULL THEN 1 ELSE (SELECT count(*) FROM audio_fingerprints d WHERE d.group_id=a.group_id) END AS duplicate_count";
-        var items=db.queryForList(select+from+where+" ORDER BY f.path LIMIT ? OFFSET ?",pageArgs.toArray());
+        String select="SELECT "+path+" AS path,COALESCE(f.bytes,s.bytes) AS bytes,f.modified_at,f.sha256,"
+                +"s.id AS song_id,s.name,s.artist,s.album,s.level,s.sample_rate,s.bits,s.downloaded_at,s.metadata_warning,"
+                +"a.duration_seconds AS audio_duration,a.fingerprint_hash AS audio_hash,a.match_type,"
+                +"CASE WHEN s.id IS NULL THEN 'UNTRACKED' WHEN f.path IS NULL THEN 'MISSING' ELSE 'ARCHIVED' END AS state,"
+                +"CASE WHEN a.group_id='' OR a.group_id IS NULL THEN 1 ELSE (SELECT count(*) FROM audio_fingerprints d WHERE d.group_id=a.group_id) END AS duplicate_count";
+        var items=db.queryForList(select+from+where+" ORDER BY "+path+" LIMIT ? OFFSET ?",pageArgs.toArray());
         return Map.of("items",items,"total",total,"page",page,"pageSize",pageSize,"totalPages",totalPages,"filter",filter,"query",query);
     }
     public synchronized void replaceFileInventory(List<InventoryEntry> entries) {
         tx.executeWithoutResult(status -> {
+            db.update("DELETE FROM audio_fingerprint_data");
             db.update("DELETE FROM audio_fingerprints");
             db.update("DELETE FROM file_inventory");
-            for(var entry:entries) db.update("INSERT INTO file_inventory(path,bytes,modified_at,sha256,scanned_at) VALUES(?,?,?,?,?)",
-                    entry.path(),entry.bytes(),entry.modifiedAt(),entry.sha256(),entry.scannedAt());
+            for(var entry:entries) db.update("INSERT INTO file_inventory(path,bytes,modified_at,sha256,scanned_at,song_id) VALUES(?,?,?,?,?,?)",
+                    entry.path(),entry.bytes(),entry.modifiedAt(),entry.sha256(),entry.scannedAt(),entry.songId());
             for(var entry:entries) db.update("INSERT INTO audio_fingerprints(path,duration_seconds,fingerprint_hash,group_id,match_type,scanned_at) VALUES(?,?,?,?,?,?)",
                     entry.path(),entry.audioDuration(),entry.audioHash(),entry.duplicateGroup(),entry.matchType(),entry.scannedAt());
+            for(var entry:entries) if(!entry.audioFingerprint().isBlank()) db.update("INSERT INTO audio_fingerprint_data(path,raw_fingerprint) VALUES(?,?)",
+                    entry.path(),entry.audioFingerprint());
         });
     }
     public List<Map<String,Object>> playlistSongs(long id) { return db.queryForList("SELECT s.* FROM members m JOIN songs s ON m.song_id=s.id WHERE m.playlist_id=? ORDER BY m.position",id); }
@@ -84,7 +98,10 @@ public class ArchiveStore {
                 db.update("INSERT INTO songs(id,name,artist,album,cover,duration,track_no) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,artist=excluded.artist,album=excluded.album,cover=excluded.cover,duration=excluded.duration,track_no=excluded.track_no",song.id(),song.name(),song.artist(),song.album(),song.cover(),song.duration(),song.trackNo());
                 boolean shouldDownload=initial?number(sub,"initial_download")==1:!old.contains(song.id());
                 var existing=song(song.id());
-                if((shouldDownload&&text(existing,"path").isBlank()) || (upgrade&&!text(existing,"path").isBlank())) enqueue(song.id(),text(sub,"policy"));
+                boolean hasFile=!text(existing,"path").isBlank();
+                // 只有「本地确实还有更高档位可拿」时才入队，否则每周自动升级会对已到顶的歌重复下载。
+                boolean upgradeWanted=upgrade&&hasFile&&QualitySelector.upgradeable(text(existing,"level"),text(sub,"policy"));
+                if((shouldDownload&&!hasFile)||upgradeWanted) enqueue(song.id(),text(sub,"policy"));
             }
             db.update("DELETE FROM members WHERE playlist_id=?",playlist.id());
             int pos=0;
@@ -118,15 +135,18 @@ public class ArchiveStore {
         switch(action) {
             case "pause" -> { if(Set.of("RUNNING","QUEUED").contains(current)) db.update("UPDATE tasks SET status='PAUSED' WHERE id=?",id); }
             case "cancel" -> { if(Set.of("RUNNING","QUEUED","PAUSED","AUTH_REQUIRED").contains(current)) db.update("UPDATE tasks SET status='CANCELLED' WHERE id=?",id); }
-            case "retry" -> {
-                if(Set.of("FAILED","CANCELLED","PAUSED","AUTH_REQUIRED").contains(current)) {
-                    long active=db.queryForObject("SELECT count(*) FROM tasks WHERE song_id=? AND status IN ('QUEUED','RUNNING','PAUSED','AUTH_REQUIRED') AND id<>?",Long.class,number(t,"song_id"),id);
-                    if(active>0) throw new IllegalArgumentException("此歌曲已有待处理任务");
-                    db.update("UPDATE tasks SET status='QUEUED',attempts=0,next_attempt=0,error='' WHERE id=?",id);
-                }
-            }
+            case "retry" -> requeue(t,false);
+            // 强制重下：跳过下载前的档位比较，用于不认可「同档位无需下载」判断的场景。
+            case "force" -> requeue(t,true);
             default -> throw new IllegalArgumentException("未知任务操作");
         }
+    }
+    private void requeue(Map<String,Object> t,boolean forced) {
+        long id=number(t,"id");
+        if(!Set.of("FAILED","CANCELLED","PAUSED","AUTH_REQUIRED","SKIPPED").contains(text(t,"status"))) return;
+        long active=db.queryForObject("SELECT count(*) FROM tasks WHERE song_id=? AND status IN ('QUEUED','RUNNING','PAUSED','AUTH_REQUIRED') AND id<>?",Long.class,number(t,"song_id"),id);
+        if(active>0) throw new IllegalArgumentException("此歌曲已有待处理任务");
+        db.update("UPDATE tasks SET status='QUEUED',attempts=0,next_attempt=0,error='',forced=? WHERE id=?",forced?1:0,id);
     }
     public synchronized void resumeAuth() { db.update("UPDATE tasks SET status='QUEUED',attempts=0,next_attempt=0 WHERE status='AUTH_REQUIRED'"); }
     public synchronized void complete(long taskId,long songId,String path,String level,long bytes,String hash,int rate,int bits,int bitrate,String warning) {

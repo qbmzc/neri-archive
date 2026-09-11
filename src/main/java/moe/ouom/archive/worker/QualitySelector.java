@@ -12,6 +12,19 @@ public class QualitySelector {
     public static List<String> order(String policy) { return "SURROUND".equals(policy)?SURROUND:FIDELITY; }
     public static int rank(String level,String policy) { int n=order(policy).indexOf(level); return n<0?999:n; }
     public static boolean better(String candidate,String current,String policy) { return rank(candidate,policy)<rank(current,policy); }
+    /** 档位是否属于该策略的已知序列。未知档位一律按「可能更好」处理，不参与跳过判断。 */
+    public static boolean known(String level,String policy) { return rank(level,policy)!=999; }
+    /**
+     * 该策略下本地是否还有可提升的档位。
+     *
+     * <p>已是策略顶档（如 FIDELITY 下的 jymaster、SURROUND 下的 sky）时返回 false，
+     * 于是每周自动升级不再为它产生任务。档位为空或未知时保守返回 true。
+     */
+    public static boolean upgradeable(String level,String policy) {
+        if(level==null||level.isBlank()) return true;
+        int position=rank(level,policy);
+        return position==999||position>0;
+    }
     public Resource resolve(MusicGateway api,long songId,String policy) throws Exception {
         Resource best=null;
         for(String level:order(policy)) {

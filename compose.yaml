@@ -10,6 +10,8 @@ services:
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env (12 or more characters)}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       DOWNLOAD_PARALLELISM: ${DOWNLOAD_PARALLELISM:-2}
+      ARCHIVE_TRASH: ${ARCHIVE_TRASH:-}
+      SUPERSEDED_RETENTION_DAYS: ${SUPERSEDED_RETENTION_DAYS:-7}
       TZ: ${TZ:-Asia/Shanghai}
     volumes:
       - archive-data:/data

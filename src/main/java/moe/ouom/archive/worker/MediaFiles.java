@@ -13,13 +13,107 @@ import static moe.ouom.archive.store.ArchiveStore.*;
 
 @Component
 public class MediaFiles {
+    private static final org.slf4j.Logger log=org.slf4j.LoggerFactory.getLogger(MediaFiles.class);
     public record Probe(String extension,double duration,int rate,int bits,int bitrate) {}
     public final Path root;
+    /** 被替换文件的回收站。默认 {@code <music>/.trash}，可用 ARCHIVE_TRASH 指向音乐目录之外。 */
+    public final Path trash;
+    private final Path work;
+    private final int retentionDays;
     private final String ffprobe,ffmpeg;
     private final ObjectMapper mapper;
-    public MediaFiles(@Value("${archive.music}") String music,@Value("${archive.ffprobe}") String ffprobe,@Value("${archive.ffmpeg}") String ffmpeg,ObjectMapper mapper) throws IOException {
-        root=Path.of(music).toAbsolutePath().normalize(); Files.createDirectories(safe(".work")); Files.createDirectories(safe("playlists"));
+    public MediaFiles(@Value("${archive.music}") String music,@Value("${archive.trash:}") String trash,
+                      @Value("${archive.superseded-retention-days:7}") int retentionDays,
+                      @Value("${archive.ffprobe}") String ffprobe,@Value("${archive.ffmpeg}") String ffmpeg,ObjectMapper mapper) throws IOException {
+        root=Path.of(music).toAbsolutePath().normalize();
+        work=root.resolve(".work");
+        this.trash=resolveTrash(trash);
+        this.retentionDays=Math.max(0,retentionDays);
+        Files.createDirectories(safe(".work")); Files.createDirectories(safe("playlists"));
         this.ffprobe=ffprobe; this.ffmpeg=ffmpeg; this.mapper=mapper;
+    }
+    private Path resolveTrash(String configured) throws IOException {
+        if(configured==null||configured.isBlank()) return root.resolve(".trash");
+        Path candidate=Path.of(configured).toAbsolutePath().normalize();
+        if(candidate.equals(root)) throw new IOException("回收站目录不能与音乐目录相同："+candidate);
+        // 音乐目录落在回收站之内会让扫描排除规则连带排除整个音乐库。
+        if(root.startsWith(candidate)) throw new IOException("音乐目录不能位于回收站目录之内："+candidate);
+        return candidate;
+    }
+    /** 扫描需要跳过的路径：清理工作目录、回收站（无论它是否位于音乐目录内），以及任何点号开头的顶层目录。 */
+    public boolean isIgnored(Path path) {
+        Path normalized=path.toAbsolutePath().normalize();
+        if(normalized.startsWith(work)||normalized.startsWith(trash)) return true;
+        if(!normalized.startsWith(root)||normalized.equals(root)) return false;
+        Path relative=root.relativize(normalized);
+        return relative.getNameCount()>=1&&relative.getName(0).toString().startsWith(".");
+    }
+    /**
+     * 把被替换的文件移入回收站。
+     *
+     * <p>任何失败都不得删除源文件——回收站的职责是保命，不能变成新的数据丢失路径。
+     * 移动不可行时旧文件留在原地，退回「孤儿文件」行为。
+     *
+     * @return 是否已移入回收站（或按 retention=0 删除）
+     */
+    public boolean moveToTrash(Path source,long songId) {
+        if(!Files.isRegularFile(source,LinkOption.NOFOLLOW_LINKS)) return false;
+        if(retentionDays==0) {
+            try { Files.deleteIfExists(source); return true; }
+            catch(IOException e) { log.warn("删除被替换的文件失败，保留原文件：{}",e.toString()); return false; }
+        }
+        Path directory=trash.resolve(Long.toString(songId));
+        Path target=uniqueTarget(directory,source.getFileName().toString());
+        try {
+            Files.createDirectories(directory);
+            try { Files.move(source,target,StandardCopyOption.ATOMIC_MOVE); }
+            catch(AtomicMoveNotSupportedException e) {
+                // 跨文件系统：退回普通移动（复制后删除），需要目标盘空间。
+                log.warn("回收站与音乐目录不在同一文件系统，改为复制后删除：{}",target.getFileName());
+                Files.move(source,target);
+            }
+            return true;
+        } catch(IOException|UnsupportedOperationException e) {
+            log.warn("无法将被替换的文件移入回收站，保留原文件：{}",e.toString());
+            return false;
+        }
+    }
+    private Path uniqueTarget(Path directory,String name) {
+        String stamp=java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmmssSSS").format(java.time.LocalDateTime.now());
+        String safe=filename(name);
+        Path candidate=directory.resolve(stamp+"-"+safe);
+        for(int i=1;Files.exists(candidate,LinkOption.NOFOLLOW_LINKS)&&i<100;i++) candidate=directory.resolve(stamp+"-"+i+"-"+safe);
+        return candidate;
+    }
+    /** 按配置的保留天数清理回收站。返回删除数量。 */
+    public int cleanupTrash() {
+        return cleanupTrash(System.currentTimeMillis()-(long)retentionDays*86_400_000L);
+    }
+    /** 删除回收站中早于 {@code cutoffMillis} 的文件，返回删除数量。只记日志，不抛出。 */
+    public int cleanupTrash(long cutoffMillis) {
+        if(!Files.isDirectory(trash,LinkOption.NOFOLLOW_LINKS)) return 0;
+        int removed=0;
+        try(var paths=Files.walk(trash)) {
+            for(Path path:paths.toList()) {
+                if(!Files.isRegularFile(path,LinkOption.NOFOLLOW_LINKS)) continue;
+                if(!path.normalize().startsWith(trash)) continue;
+                try {
+                    if(Files.getLastModifiedTime(path,LinkOption.NOFOLLOW_LINKS).toMillis()>=cutoffMillis) continue;
+                    Files.deleteIfExists(path); removed++;
+                } catch(IOException e) { log.warn("回收站文件删除失败 {}：{}",trash.relativize(path),e.toString()); }
+            }
+        } catch(IOException e) { log.warn("回收站清理失败：{}",e.toString()); return removed; }
+        removeEmptyTrashDirectories();
+        return removed;
+    }
+    private void removeEmptyTrashDirectories() {
+        try(var paths=Files.walk(trash)) {
+            for(Path directory:paths.sorted(Comparator.reverseOrder()).toList()) {
+                if(directory.equals(trash)||!Files.isDirectory(directory,LinkOption.NOFOLLOW_LINKS)) continue;
+                try(var entries=Files.list(directory)) { if(entries.findAny().isEmpty()) Files.deleteIfExists(directory); }
+                catch(IOException ignored) { /* 非空或已被并发删除 */ }
+            }
+        } catch(IOException ignored) { /* 回收站不存在或不可读 */ }
     }
     public Path safe(String relative) throws IOException {
         Path result=root.resolve(relative).normalize();
@@ -67,17 +161,6 @@ public class MediaFiles {
             if(!Files.isRegularFile(path,LinkOption.NOFOLLOW_LINKS)) throw new FileSystemException(path.toString(),null,"音频目标不是普通文件");
             paths.add(path);
         }
-    }
-    public static Path largest(Path incoming,List<Path> existing) throws IOException {
-        Path selected=incoming;
-        long size=Files.size(incoming);
-        for(Path candidate:existing) {
-            long candidateSize=Files.size(candidate);
-            if(candidateSize>size || (candidateSize==size && selected.equals(incoming))) {
-                selected=candidate; size=candidateSize;
-            }
-        }
-        return selected;
     }
     private String run(List<String> args,int seconds) throws Exception {
         Path output=Files.createTempFile(root.resolve(".work"),"probe-",".log");

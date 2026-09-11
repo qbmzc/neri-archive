@@ -31,6 +31,23 @@ public class MediaFiles {
         this.retentionDays=Math.max(0,retentionDays);
         Files.createDirectories(safe(".work")); Files.createDirectories(safe("playlists"));
         this.ffprobe=ffprobe; this.ffmpeg=ffmpeg; this.mapper=mapper;
+        log.info("音乐目录 {}；回收站 {}（保留 {} 天，0 表示不保留）",root,this.trash,this.retentionDays);
+        warnWhenTrashIsOnAnotherFilesystem();
+    }
+    /** 跨文件系统时原子移动不可用，会退化为复制后删除：能跑，但更慢且占用目标盘空间。 */
+    private void warnWhenTrashIsOnAnotherFilesystem() {
+        try {
+            var music=Files.getFileStore(root);
+            var target=Files.getFileStore(nearestExisting(this.trash));
+            if(!music.name().equals(target.name())||!music.type().equals(target.type()))
+                log.warn("回收站与音乐目录不在同一文件系统，被替换的文件将复制而非原子移动：{}",this.trash);
+        } catch(Exception e) { log.debug("无法比较回收站与音乐目录的文件系统：{}",e.toString()); }
+    }
+    private static Path nearestExisting(Path path) throws IOException {
+        Path candidate=path;
+        while(candidate!=null&&!Files.exists(candidate,LinkOption.NOFOLLOW_LINKS)) candidate=candidate.getParent();
+        if(candidate==null) throw new IOException("路径不存在："+path);
+        return candidate;
     }
     private Path resolveTrash(String configured) throws IOException {
         if(configured==null||configured.isBlank()) return root.resolve(".trash");

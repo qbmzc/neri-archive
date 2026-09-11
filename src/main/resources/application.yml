@@ -26,6 +26,11 @@ spring:
 archive:
   data: ${ARCHIVE_DATA:./data}
   music: ${ARCHIVE_MUSIC:./music}
+  # 回收站留空表示 <archive.music>/.trash。这两项必须显式映射：
+  # @Value 走的是 Spring 的宽松绑定，archive.superseded-retention-days 只会去找
+  # ARCHIVE_SUPERSEDED_RETENTION_DAYS，而不是 SUPERSEDED_RETENTION_DAYS。
+  trash: ${ARCHIVE_TRASH:}
+  superseded-retention-days: ${SUPERSEDED_RETENTION_DAYS:7}
   admin-password: ${ADMIN_PASSWORD:}
   parallelism: ${DOWNLOAD_PARALLELISM:2}
   ffmpeg: ${FFMPEG:ffmpeg}

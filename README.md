@@ -52,7 +52,7 @@ Dockerfile 使用可供 amd64/arm64 构建的基础镜像；双架构实际镜�
 
 ```sh
 docker pull ghcr.io/qbmzc/neri-archive:latest
-# 或指定版本镜像 ghcr.io/qbmzc/neri-archive:0.2.0
+# 或指定版本镜像 ghcr.io/qbmzc/neri-archive:0.2.1
 ```
 
 ## 本地 Java 开发
@@ -65,14 +65,14 @@ docker pull ghcr.io/qbmzc/neri-archive:latest
 # 本次环境已准备项目内 Maven 时，可使用：
 # .\build.ps1 -Maven "$PWD\.tools\apache-maven-3.9.9\bin\mvn.cmd"
 $env:ADMIN_PASSWORD = '请替换成你自己的长密码'
-java -jar target/neri-archive-0.2.0.jar
+java -jar target/neri-archive-0.2.1.jar
 ```
 
 ```sh
 # Linux / macOS
 sh build.sh
 export ADMIN_PASSWORD='replace-with-your-own-long-password'
-java -jar target/neri-archive-0.2.0.jar
+java -jar target/neri-archive-0.2.1.jar
 ```
 
 单独运行 `mvn test` 执行后端测试。`frontend` 内执行 `npm run build` 进行 TypeScript 检查与构建。`npm run dev` 只用于前端开发，API 代理到 8080；完整登录与同源验收以打包后的 8080 服务为准。

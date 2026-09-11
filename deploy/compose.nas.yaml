@@ -7,7 +7,7 @@ name: neri-archive
 
 services:
   archive:
-    image: ghcr.io/qbmzc/neri-archive:v0.2.0
+    image: ghcr.io/qbmzc/neri-archive:v0.2.1
     container_name: neri-archive
     restart: unless-stopped
     init: true

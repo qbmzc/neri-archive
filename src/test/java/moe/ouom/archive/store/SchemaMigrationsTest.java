@@ -2,8 +2,10 @@ package moe.ouom.archive.store;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.jdbc.datasource.init.ScriptUtils;
 
 import java.nio.file.Path;
 import java.util.List;
@@ -54,6 +56,31 @@ class SchemaMigrationsTest {
     @Test void missingTableFailsLoudlyInsteadOfSkippingMigration() {
         var error=assertThrows(IllegalStateException.class,()->new SchemaMigrations(database(root.resolve("empty.db"))));
         assertTrue(error.getMessage().contains("tasks"),error.getMessage());
+    }
+
+    /**
+     * 生产事故回归：已发布的 0.1.0 数据库在启动时直接崩溃。
+     *
+     * <p>{@code schema.sql} 由 Spring 在 {@code SchemaMigrations} 之前执行，而它对已存在的表是
+     * {@code CREATE TABLE IF NOT EXISTS} 的 no-op。因此 schema.sql 里任何引用「由迁移新增的列」的
+     * 语句（索引、视图）都会在旧库上失败，整个应用起不来。
+     *
+     * <p>本测试按真实启动顺序执行两份脚本，旧库必须能升级成功。
+     */
+    @Test void upgradesAReleasedDatabaseWithoutFailingOnSchemaSql() throws Exception {
+        var source=new DriverManagerDataSource("jdbc:sqlite:"+root.resolve("released.db"));
+        try(var connection=source.getConnection()) {
+            ScriptUtils.executeSqlScript(connection,new ClassPathResource("legacy-schema-0.1.0.sql"));
+            // 这一步曾经抛 [SQLITE_ERROR] no such column: song_id
+            ScriptUtils.executeSqlScript(connection,new ClassPathResource("schema.sql"));
+        }
+
+        new SchemaMigrations(new JdbcTemplate(source));
+
+        var db=new JdbcTemplate(source);
+        assertTrue(columns(db,"tasks").contains("forced"));
+        assertTrue(columns(db,"file_inventory").contains("song_id"));
+        assertTrue(indexes(db,"file_inventory").contains("idx_inventory_song"));
     }
 
     static List<String> columns(JdbcTemplate db,String table) {

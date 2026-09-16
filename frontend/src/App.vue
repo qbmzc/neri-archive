@@ -3,6 +3,13 @@ import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 const clearTimeout = (id: number) => window.clearTimeout(id);
 type Row = Record<string, any>;
 const tab = ref('overview');
+const theme = ref<'light' | 'dark'>(document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light');
+function toggleTheme() {
+  theme.value = theme.value === 'dark' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = theme.value;
+  try { localStorage.setItem('neri-theme', theme.value); } catch {}
+  document.querySelector('meta[name=theme-color]')?.setAttribute('content', theme.value === 'dark' ? '#0f1410' : '#174f3d');
+}
 const tabs = [{ id: 'overview', icon: '◫', label: '总览' }, { id: 'subscriptions', icon: '▤', label: '歌单订阅' }, { id: 'tasks', icon: '↓', label: '下载队列' }, { id: 'library', icon: '♫', label: '音乐档案' }, { id: 'logs', icon: '≡', label: '运行日志' }, { id: 'settings', icon: '⚙', label: '账号与设置' }];
 const logs = ref<Row[]>([]); const logLevel = ref('ALL'); const logQuery = ref(''); const logAuto = ref(true); const logError = ref(''); const logBusy = ref(false);
 async function refreshLogs() {
@@ -13,6 +20,7 @@ async function refreshLogs() {
 watch([tab, logLevel], () => { if (tab.value === 'logs') void refreshLogs(); });
 const overview = ref<Row>({}); const subscriptions = ref<Row[]>([]); const tasks = ref<Row[]>([]);
 const duplicates = ref<Row>({ state: 'IDLE', groups: [] });
+const trash = ref<Row>({ files: 0, bytes: 0 });
 const inventory = ref<Row>({ items: [], total: 0, page: 1, pageSize: 50, totalPages: 1 });
 const filePage = ref(1); const fileQuery = ref(''); const fileFilter = ref('ALL'); let inventoryRequest = 0;
 const account = ref<Row | null>(null); const accountMessage = ref('尚未检查登录'); const loaded = ref(false); const busy = ref(false);
@@ -39,7 +47,19 @@ async function refresh() {
   const firstLoad = !loaded.value;
   const results = await Promise.all([api('/overview'), api('/subscriptions'), api('/tasks'), api('/library/duplicates')]);
   [overview.value, subscriptions.value, tasks.value, duplicates.value] = results; loaded.value = true;
-  if (firstLoad || tab.value === 'library') await refreshInventory();
+  if (firstLoad || tab.value === 'library') await Promise.all([refreshInventory(), refreshTrash()]);
+}
+async function refreshTrash() { trash.value = await api('/library/trash'); }
+async function cleanDuplicates() {
+  const count = duplicates.value.duplicateFiles ?? 0;
+  if (!count) return;
+  if (!window.confirm(`将 ${count} 个重复副本移入回收站？每个重复组保留码率或体积最大的文件；已归档歌曲只有在确认有更优副本时才会改指。`)) return;
+  await action(() => api('/library/duplicates/cleanup', 'POST'), '重复副本已移入回收站');
+}
+async function emptyTrash() {
+  if (!trash.value.files) return;
+  if (!window.confirm(`清空回收站？${trash.value.files} 个文件（${bytes(trash.value.bytes)}）将被永久删除，无法恢复。`)) return;
+  await action(() => api('/library/trash/empty', 'POST'), '回收站已清空');
 }
 async function refreshInventory() {
   const request = ++inventoryRequest;
@@ -105,7 +125,7 @@ onUnmounted(() => { clearTimeout(refreshTimer); clearTimeout(qrTimer); clearTime
       <div class="sidebar-bottom"><div class="storage"><span class="live-dot"></span> 私人存储<small>剩余 {{ bytes(overview.freeBytes) }}</small></div><button class="text-button" @click="logoutAdmin">退出管理账号 ↗</button><small class="version">NERI ARCHIVE / 0.1</small></div>
     </aside>
     <main>
-      <header class="topbar"><span>工作空间 <span class="separator">/</span> {{ currentTitle }}</span><button class="account-pill" @click="tab = 'settings'"><span class="live-dot" :class="{ offline: !account }"></span>{{ account ? account.nickname || '网易云已连接' : '连接网易云账号' }}</button></header>
+      <header class="topbar"><span>工作空间 <span class="separator">/</span> {{ currentTitle }}</span><div class="topbar-actions"><button class="theme-toggle" :title="theme === 'dark' ? '切换到浅色模式' : '切换到深色模式'" :aria-label="theme === 'dark' ? '切换到浅色模式' : '切换到深色模式'" @click="toggleTheme">{{ theme === 'dark' ? '☀' : '☾' }}</button><button class="account-pill" @click="tab = 'settings'"><span class="live-dot" :class="{ offline: !account }"></span>{{ account ? account.nickname || '网易云已连接' : '连接网易云账号' }}</button></div></header>
       <div class="content">
         <template v-if="tab === 'overview'">
           <div class="page-heading"><div><div class="eyebrow">YOUR MUSIC, PRESERVED.</div><h1>让喜欢的音乐，留下来。</h1><p>关注歌单的每一次更新，自动保存可用的最高音质。</p></div><button class="primary" @click="edit()">＋ 添加歌单</button></div>
@@ -136,7 +156,7 @@ onUnmounted(() => { clearTimeout(refreshTimer); clearTimeout(qrTimer); clearTime
           <p v-else-if="duplicates.fingerprintWarning" class="inline-error">{{ duplicates.fingerprintWarning }}</p>
           <p v-else-if="duplicates.errorCount" class="inline-error">有 {{ duplicates.errorCount }} 个文件未能完成全部检查，详情请查看运行日志。</p>
           <section v-if="duplicates.groups?.length" class="duplicate-results">
-            <div class="duplicate-results-heading"><div><h2>重复检查结果</h2><small>共 {{ duplicates.duplicateGroups }} 个独立分组</small></div><small>仅供确认，不会自动删除文件</small></div>
+            <div class="duplicate-results-heading"><div><h2>重复检查结果</h2><small>共 {{ duplicates.duplicateGroups }} 个独立分组 · 保留码率或体积最大的副本</small></div><button class="secondary" :disabled="busy || !duplicates.duplicateFiles" @click="cleanDuplicates">清理重复副本</button></div>
             <div class="duplicate-group-list">
               <article v-for="(group, index) in duplicates.groups" :key="group.matchType + group.files[0]" class="duplicate-group-card">
                 <header><div><span class="group-number">重复组 {{ index + 1 }}</span><strong>{{ group.files.length }} 个文件</strong></div><span class="match-badge" :class="group.matchType">{{ group.matchType === 'EXACT' ? 'SHA-256 完全相同' : '疑似同一音频' }}</span></header>
@@ -145,6 +165,7 @@ onUnmounted(() => { clearTimeout(refreshTimer); clearTimeout(qrTimer); clearTime
               </article>
             </div>
           </section>
+          <section class="trash-bar"><div><span>回收站</span><strong>{{ trash.files ?? 0 }} 个文件 · {{ bytes(trash.bytes) }}</strong><small>清理或替换掉的音频暂存在这里，确认无误后可清空；清空后无法恢复。</small></div><button class="secondary" :disabled="busy || !trash.files" @click="emptyTrash">清空回收站</button></section>
           <div class="section-title inventory-title"><h2>音频文件 <span>{{ inventory.total }}</span></h2><small>每页 50 个</small></div>
           <form class="file-toolbar" @submit.prevent="searchInventory"><input v-model="fileQuery" placeholder="搜索文件路径、歌曲、歌手或专辑…" aria-label="搜索音频文件"><select v-model="fileFilter" aria-label="筛选音频文件" @change="searchInventory"><option value="ALL">全部文件</option><option value="ARCHIVED">已归档</option><option value="UNTRACKED">仅存量文件</option><option value="MISSING">文件缺失</option><option value="DUPLICATE">重复副本</option></select><button>搜索</button></form>
           <div v-if="!inventory.items?.length" class="empty compact"><span>⌕</span><h3>{{ fileQuery ? '没有匹配的音频文件' : '尚未清点到音频文件' }}</h3><p>完成重复文件扫描后，存量音频会分页显示在这里；已归档的歌曲无需等待扫描。</p></div>

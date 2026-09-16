@@ -195,6 +195,24 @@ class StoreAndSecurityTest {
         assertEquals("",text(store.task(id),"error"));
     }
 
+    @Test void duplicateCleanupRepointsSongAndDissolvesStaleGroups() {
+        db.update("INSERT INTO songs(id,name,artist,album,duration,path,level) VALUES(1,'S','A','B',1000,'a.flac','lossless')");
+        db.update("INSERT INTO file_inventory(path,bytes,modified_at,sha256,scanned_at,song_id) VALUES('a.flac',10,1,'x',1,NULL)");
+        db.update("INSERT INTO file_inventory(path,bytes,modified_at,sha256,scanned_at,song_id) VALUES('b.flac',20,1,'y',1,1)");
+        db.update("INSERT INTO audio_fingerprints(path,duration_seconds,fingerprint_hash,group_id,match_type,scanned_at) VALUES('a.flac',180,1,'audio-1','AUDIO',1)");
+        db.update("INSERT INTO audio_fingerprints(path,duration_seconds,fingerprint_hash,group_id,match_type,scanned_at) VALUES('b.flac',180,1,'audio-1','AUDIO',1)");
+
+        // 保留未归档的 a.flac：歌曲改指，存量表同步，旧路径记录被清理。
+        store.repointSong(1,"a.flac",10,"x",96000,24,900000);
+        store.removeInventory(List.of("b.flac"));
+
+        assertEquals("a.flac",text(store.song(1),"path"));
+        assertEquals(1L,db.queryForObject("SELECT song_id FROM file_inventory WHERE path='a.flac'",Long.class));
+        assertEquals(0L,db.queryForObject("SELECT count(*) FROM file_inventory WHERE path='b.flac'",Long.class));
+        // 组内只剩一个文件，分组标记随之清空。
+        assertEquals(0L,db.queryForObject("SELECT count(*) FROM audio_fingerprints WHERE group_id<>''",Long.class));
+    }
+
     @Test void actualPasswordLoginWorks() throws Exception {
         mvc.perform(post("/login").with(csrf()).param("username","admin").param("password","test-password-only-123"))
                 .andExpect(status().is3xxRedirection()).andExpect(redirectedUrl("/"));

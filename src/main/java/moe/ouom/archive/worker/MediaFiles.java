@@ -106,6 +106,21 @@ public class MediaFiles {
     public int cleanupTrash() {
         return cleanupTrash(System.currentTimeMillis()-(long)retentionDays*86_400_000L);
     }
+    /** 立即清空回收站（不做保留期判断），返回删除数量。 */
+    public int emptyTrash() { return cleanupTrash(Long.MAX_VALUE); }
+    /** 回收站中的文件数与占用字节数。 */
+    public Map<String,Object> trashStats() {
+        long files=0,bytes=0;
+        if(Files.isDirectory(trash,LinkOption.NOFOLLOW_LINKS)) {
+            try(var paths=Files.walk(trash)) {
+                for(Path path:paths.toList()) {
+                    if(!Files.isRegularFile(path,LinkOption.NOFOLLOW_LINKS)||!path.normalize().startsWith(trash)) continue;
+                    try { bytes+=Files.size(path); files++; } catch(IOException ignored) { /* 并发删除 */ }
+                }
+            } catch(IOException ignored) { /* 回收站不存在或不可读 */ }
+        }
+        return Map.of("files",files,"bytes",bytes,"path",trash.toString());
+    }
     /** 删除回收站中早于 {@code cutoffMillis} 的文件，返回删除数量。只记日志，不抛出。 */
     public int cleanupTrash(long cutoffMillis) {
         if(!Files.isDirectory(trash,LinkOption.NOFOLLOW_LINKS)) return 0;

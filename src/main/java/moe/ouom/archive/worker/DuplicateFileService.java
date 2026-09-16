@@ -61,7 +61,7 @@ public class DuplicateFileService {
         } finally { completedAt=System.currentTimeMillis(); running=false; }
     }
 
-    void scanNow() throws Exception {
+    synchronized void scanNow() throws Exception {
         Map<String,Map<String,Object>> previous=new HashMap<>();
         for(var row:store.fileInventory()) previous.put(text(row,"path"),row);
         // 扫描已经走遍音乐目录，顺手把「文件属于哪首歌」解析出来落成整数列，
@@ -211,10 +211,7 @@ public class DuplicateFileService {
     }
 
     public Map<String,Object> report() {
-        List<InventoryEntry> entries=store.fileInventory().stream().map(row -> new InventoryEntry(
-                text(row,"path"),number(row,"bytes"),number(row,"modified_at"),text(row,"sha256"),number(row,"audio_hash"),
-                row.get("audio_duration") instanceof Number n?n.doubleValue():0,text(row,"audio_fingerprint"),text(row,"duplicate_group"),text(row,"match_type"),
-                row.get("song_id") instanceof Number id?id.longValue():null,number(row,"scanned_at"))).toList();
+        List<InventoryEntry> entries=entries();
         List<Map<String,Object>> groups=groups(entries);
         long duplicateFiles=groups.stream().mapToLong(g->((List<?>)g.get("files")).size()-1).sum();
         long reclaimable=groups.stream().mapToLong(g->number(g,"reclaimableBytes")).sum();
@@ -229,6 +226,89 @@ public class DuplicateFileService {
         result.put("fingerprintWarning",fingerprintWarning.isBlank()&&!entries.isEmpty()&&!hasAudioFingerprints?"现有扫描结果不含音频指纹，请确认已安装 fpcalc 后重新扫描":fingerprintWarning);
         result.put("errorCount",errorCount); result.put("error",error); result.put("groups",groups);
         return result;
+    }
+
+    private List<InventoryEntry> entries() {
+        return store.fileInventory().stream().map(row -> new InventoryEntry(
+                text(row,"path"),number(row,"bytes"),number(row,"modified_at"),text(row,"sha256"),number(row,"audio_hash"),
+                row.get("audio_duration") instanceof Number n?n.doubleValue():0,text(row,"audio_fingerprint"),text(row,"duplicate_group"),text(row,"match_type"),
+                row.get("song_id") instanceof Number id?id.longValue():null,number(row,"scanned_at"))).toList();
+    }
+
+    /**
+     * 一键清理重复副本：每个分组只保留一个文件，其余移入回收站（绝不直接删除）。
+     *
+     * <p>保留规则是「码率高的优先、其次文件大的」：码率按扫描时的音频指纹时长与文件
+     * 字节数估算；内容完全相同（同一 SHA-256）时优先保留已归档文件，避免无谓改指。
+     * 同一音频属于多首已归档歌曲时整组跳过——移动任何一份都会让另一首歌的归档路径失效。
+     * 文件自扫描后发生变化时跳过，不使用过期清单操作文件。
+     */
+    public synchronized Map<String,Object> cleanup() {
+        if(running) throw new IllegalArgumentException("扫描正在进行，请稍后再清理重复文件");
+        Map<String,List<InventoryEntry>> grouped=new LinkedHashMap<>();
+        for(var entry:entries()) if(!entry.duplicateGroup().isBlank()) grouped.computeIfAbsent(entry.duplicateGroup(),ignored->new ArrayList<>()).add(entry);
+        int moved=0,skippedGroups=0,skippedFiles=0,repointed=0;
+        long freed=0;
+        Set<String> removed=new LinkedHashSet<>();
+        for(var group:grouped.values()) {
+            List<InventoryEntry> candidates=group.stream().filter(this::unchanged).toList();
+            if(candidates.size()<2||candidates.stream().filter(e->e.songId()!=null).count()>1) { skippedGroups++; continue; }
+            InventoryEntry keeper=selectKeeper(candidates);
+            InventoryEntry archived=candidates.stream().filter(e->e.songId()!=null).findFirst().orElse(null);
+            // 归档文件不是保留对象时，先把歌曲指向保留文件再移动归档文件；顺序反了会短暂丢失归档路径。
+            if(archived!=null&&keeper!=archived) {
+                MediaFiles.Probe probe=probeOf(keeper);
+                store.repointSong(archived.songId(),keeper.path(),keeper.bytes(),keeper.sha256(),
+                        probe==null?0:probe.rate(),probe==null?0:probe.bits(),probe==null?0:probe.bitrate());
+                repointed++;
+            }
+            for(var entry:candidates) {
+                if(entry==keeper) continue;
+                try {
+                    if(files.moveToTrash(files.safe(entry.path()),entry.songId()==null?0:entry.songId())) {
+                        moved++; freed+=entry.bytes(); removed.add(entry.path());
+                    } else skippedFiles++;
+                } catch(Exception e) { skippedFiles++; log.warn("无法移动重复文件 {}：{}",entry.path(),DownloadWorker.safeError(e)); }
+            }
+        }
+        store.removeInventory(removed);
+        if(moved>0) log.info("重复文件清理：移入回收站 {} 个，释放 {} 字节，{} 首歌曲改指保留文件，跳过 {} 组",moved,freed,repointed,skippedGroups);
+        Map<String,Object> result=new LinkedHashMap<>();
+        result.put("moved",moved); result.put("freedBytes",freed); result.put("repointed",repointed);
+        result.put("skippedGroups",skippedGroups); result.put("skippedFiles",skippedFiles);
+        return result;
+    }
+
+    /** 文件自扫描后未被修改过才允许移动，避免拿过期清单操作文件。 */
+    private boolean unchanged(InventoryEntry entry) {
+        try {
+            Path path=files.safe(entry.path());
+            BasicFileAttributes attrs=Files.readAttributes(path,BasicFileAttributes.class,LinkOption.NOFOLLOW_LINKS);
+            return attrs.isRegularFile()&&attrs.size()==entry.bytes()&&attrs.lastModifiedTime().toMillis()==entry.modifiedAt();
+        } catch(Exception e) { return false; }
+    }
+
+    /** 码率高者优先，其次文件大者；完全相同时优先已归档文件。 */
+    private static InventoryEntry selectKeeper(List<InventoryEntry> candidates) {
+        InventoryEntry keeper=null;
+        for(var candidate:candidates) if(keeper==null||better(candidate,keeper)>0) keeper=candidate;
+        if(candidates.stream().map(InventoryEntry::sha256).distinct().count()==1)
+            keeper=candidates.stream().filter(e->e.songId()!=null).findFirst().orElse(keeper);
+        return keeper;
+    }
+
+    private static int better(InventoryEntry candidate,InventoryEntry keeper) {
+        if(candidate.audioDuration()>0&&keeper.audioDuration()>0) {
+            int comparison=Long.compare((long)(candidate.bytes()*8/candidate.audioDuration()),(long)(keeper.bytes()*8/keeper.audioDuration()));
+            if(comparison!=0) return comparison;
+        }
+        return Long.compare(candidate.bytes(),keeper.bytes());
+    }
+
+    /** 保留文件的实测规格；探测失败返回 null，调用方按未探测处理，不伪造规格。 */
+    private MediaFiles.Probe probeOf(InventoryEntry entry) {
+        try { return files.probe(files.safe(entry.path()),0); }
+        catch(Exception e) { return null; }
     }
 
     private static List<Map<String,Object>> groups(List<InventoryEntry> entries) {

@@ -79,6 +79,18 @@ class MediaFilesTest {
         assertEquals(0,files.cleanupTrash());
         assertFalse(Files.exists(directory));
     }
+    @Test void emptyTrashRemovesEverythingAndReportsStats() throws Exception {
+        var files=new MediaFiles(root.toString(),"",7,"ffprobe","ffmpeg",new ObjectMapper());
+        Path directory=files.trash.resolve("11"); Files.createDirectories(directory);
+        Files.writeString(directory.resolve("20200101-000000000-old.flac"),"old");
+        Files.writeString(directory.resolve("20200101-000000001-new.flac"),"newer");
+        Map<String,Object> stats=files.trashStats();
+        assertEquals(2L,stats.get("files"));
+        assertEquals(8L,stats.get("bytes"));
+        assertEquals(2,files.emptyTrash());
+        assertFalse(Files.exists(directory));
+        assertEquals(0L,files.trashStats().get("files"));
+    }
     @Test void actualFlacProbeAndLosslessTagging() throws Exception {
         boolean available;
         try { Process p=new ProcessBuilder("ffmpeg","-version").redirectOutput(ProcessBuilder.Redirect.DISCARD).redirectError(ProcessBuilder.Redirect.DISCARD).start(); available=p.waitFor(5,TimeUnit.SECONDS)&&p.exitValue()==0; }

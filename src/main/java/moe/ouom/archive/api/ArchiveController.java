@@ -132,6 +132,19 @@ public class ArchiveController {
         return Map.of("started",started,"message",started?"已开始扫描现有音频文件":"扫描正在进行中");
     }
 
+    @PostMapping("/api/library/duplicates/cleanup")
+    public Object cleanupDuplicates() {
+        var result=duplicates.cleanup();
+        engine.exportPlaylists();
+        return result;
+    }
+
+    @GetMapping("/api/library/trash")
+    public Object trash() { return files.trashStats(); }
+
+    @PostMapping("/api/library/trash/empty")
+    public Object emptyTrash() { return Map.of("removed",files.emptyTrash()); }
+
     @PostMapping("/api/library/{id}/upgrade")
     public void upgrade(@PathVariable long id) {
         store.enqueue(id, "FIDELITY");
